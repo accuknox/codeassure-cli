@@ -1,0 +1,15 @@
+[project]
+name = "codeassure"
+version = "0.1.0"
+description = "AI-powered SAST finding verification"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai-slim[openai]",
+    "pydantic>=2.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["sast_verify*"]
+
+[project.scripts]
+codeassure = "sast_verify.cli:main"
