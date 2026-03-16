@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from ..schema import EvidenceBundle
-from .rule_policies import lookup_policy
 
 
 def build_user_message(bundle: EvidenceBundle) -> str:
@@ -31,13 +30,6 @@ def build_user_message(bundle: EvidenceBundle) -> str:
         parts.append(f"- **taint_sink**: `{f.taint_sink}`")
     if f.fix:
         parts.append(f"- **suggested_fix**: {f.fix}")
-
-    # Inject rule-family policy if available
-    policy = lookup_policy(f.check_id)
-    if policy:
-        parts.append("\n## Verdict Policy (for this rule family)")
-        parts.append(f"- **policy**: {policy['verdict_policy']}")
-        parts.append(f"- **rule_kind**: {policy['rule_kind']}")
 
     return "\n".join(parts)
 

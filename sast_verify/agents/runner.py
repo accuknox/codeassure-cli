@@ -32,7 +32,7 @@ def _fix_unquoted_strings(text: str) -> str:
     """
     # Match "reason": followed by unquoted text, greedily up to the last
     # , "next_key" or lone } that closes the object
-    pattern = r'("reason")\s*:\s*(?!")(.+?)(?=,\s*"evidence_locations"\s*:|,\s*"verdict"\s*:|,\s*"confidence"\s*:|,\s*"is_security_vulnerability"\s*:|,\s*"finding_correct"\s*:|\s*}\s*$)'
+    pattern = r'("reason")\s*:\s*(?!")(.+?)(?=,\s*"evidence_locations"\s*:|,\s*"verdict"\s*:|,\s*"confidence"\s*:|,\s*"is_security_vulnerability"\s*:|\s*}\s*$)'
     def _quote_value(m: re.Match) -> str:
         key = m.group(1)
         val = m.group(2).strip().rstrip(',').strip()
@@ -255,8 +255,7 @@ async def _analyze_one(
                 f"Your response could not be parsed: {exc}\n\n"
                 "Return ONLY a valid JSON object with these exact keys:\n"
                 '{"verdict": "true_positive|false_positive|uncertain", '
-                '"finding_correct": true or false or null, '
-                '"is_security_vulnerability": true or false or null, '
+                '"is_security_vulnerability": true or false, '
                 '"confidence": "high|medium|low", '
                 '"reason": "...", "evidence_locations": ["file:line"]}\n'
                 "No markdown fences, no prose."
@@ -307,16 +306,6 @@ async def _analyze_one(
         verdict.evidence_locations, accessed_paths, bundle.finding.path,
         finding_start, finding_end,
     )
-
-    # Coherence: finding_correct must align with verdict (skip if None/uncertain)
-    if verdict.finding_correct is not None:
-        if verdict.finding_correct and verdict.verdict == "false_positive":
-            log.warning("Finding %d: finding_correct=true contradicts verdict=FP → overriding to TP", index)
-            verdict.verdict = "true_positive"
-        elif not verdict.finding_correct and verdict.verdict == "true_positive":
-            log.warning("Finding %d: finding_correct=false contradicts verdict=TP → overriding to FP", index)
-            verdict.verdict = "false_positive"
-
     return verdict
 
 

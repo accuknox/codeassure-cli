@@ -51,7 +51,6 @@ def run(
     for result, verdict in zip(raw["results"], verdicts):
         result["verification"] = {
             "verdict": verdict.verdict,
-            "finding_correct": verdict.finding_correct,
             "is_security_vulnerability": verdict.is_security_vulnerability,
             "confidence": verdict.confidence,
             "reason": verdict.reason,
@@ -109,9 +108,7 @@ def verify(
         finding_correctness = pred_verdict
 
         # Security vulnerability: collapsed view (existing logic)
-        # Only collapse when is_security_vulnerability is explicitly False;
-        # None means "not assessed" (uncertain/fallback) — don't collapse.
-        if pred_verdict == "true_positive" and pred_is_sec is False:
+        if pred_verdict == "true_positive" and not pred_is_sec:
             security_effective = "false_positive"
         else:
             security_effective = pred_verdict

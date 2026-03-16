@@ -40,16 +40,10 @@ class Verdict(BaseModel):
     verdict: Literal["true_positive", "false_positive", "uncertain"] = Field(
         description="Whether the SAST finding is a true positive, false positive, or uncertain",
     )
-    finding_correct: bool | None = Field(
-        default=None,
-        description="True if the scanner correctly detected the pattern it claims; "
-        "false if not; null when verdict is uncertain or could not be determined",
-    )
-    is_security_vulnerability: bool | None = Field(
-        default=None,
+    is_security_vulnerability: bool = Field(
+        default=True,
         description="True if the finding represents an exploitable security vulnerability; "
-        "false if it is a best-practice recommendation, style issue, or informational notice; "
-        "null when verdict is uncertain or could not be determined",
+        "false if it is a best-practice recommendation, style issue, or informational notice",
     )
     confidence: Literal["high", "medium", "low"] = Field(
         description="Confidence level of the verdict",
