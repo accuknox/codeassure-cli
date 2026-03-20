@@ -14,7 +14,7 @@ services:
               count: all
               capabilities: [gpu]
     command:
-      - Qwen/Qwen2.5-7B-Instruct
+      - Sehyo/Qwen3.5-122B-A10B-NVFP4
       - --served-model-name
       - qwen35-nvfp4
       - --swap-space
