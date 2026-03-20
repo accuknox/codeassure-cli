@@ -26,6 +26,11 @@ def main() -> None:
         help="Path to codeassure.json (default: ./codeassure.json)",
     )
     parser.add_argument(
+            "--severity","-s", type=str,
+            default="INFO,WARNING,LOW,MEDIUM,HIGH,CRITICAL,UNKNOWN,NOT_AVAILABLE,INFORMATIONAL",
+            help="Comma-separated list of severities to check for AI analysis. If any match, AI analysis will run on those findings."
+        )
+    parser.add_argument(
         "--jobs", "-j", type=int, default=None, metavar="N",
         help="Max concurrent LLM requests (overrides config)",
     )
@@ -44,7 +49,7 @@ def main() -> None:
     if concurrency < 1:
         parser.error("--jobs must be at least 1")
 
-    run(args.codebase, args.findings, args.output, concurrency=concurrency)
+    run(args.codebase, args.findings, args.output, concurrency=concurrency, severities=args.severity.split(","))
 
     if args.verify:
         csv_path = args.output.with_suffix(".csv")

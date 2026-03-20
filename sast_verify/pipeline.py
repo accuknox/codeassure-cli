@@ -27,15 +27,21 @@ def run(
     findings_path: Path,
     output_path: Path,
     concurrency: int = 4,
+    severities: list[str] | None = ["INFO", "WARNING", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN", "NOT_AVAILABLE", "INFORMATIONAL"],
 ) -> None:
     findings = preprocess(findings_path)
     bundles = [retrieve(finding, codebase) for finding in findings]
-
     # Only anchored findings go to the agent; unanchored → deterministic uncertain
     verdicts: list[Verdict] = [_no_anchor_verdict()] * len(bundles)
     to_analyze = [(i, b) for i, b in enumerate(bundles) if b.evidence]
+    if severities is not None:
+        to_analyze = [
+            (i, b) for i, b in to_analyze
+            if (b.finding.impact or "NOT_AVAILABLE").upper() in severities
+        ]
 
     skipped = len(bundles) - len(to_analyze)
+    print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI")
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
 

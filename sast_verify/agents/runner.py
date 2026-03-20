@@ -156,7 +156,7 @@ async def _analyze_one(
     bundle: EvidenceBundle,
     codebase: Path,
     index: int,
-    stage_timeout: float = 120,
+    stage_timeout: float = 500,
     grep_max_file_size: int = MAX_GREP_FILE_SIZE_DEFAULT,
     grep_max_bytes: int = MAX_GREP_BYTES_DEFAULT,
     request_limit: int = 200,
@@ -329,6 +329,7 @@ async def analyze_all(
     async def _bounded(index: int, bundle: EvidenceBundle) -> Verdict:
         async with semaphore:
             thinking = cfg.get_thinking_settings(bundle.finding.severity)
+            print(f"Starting analysis for finding {index} (severity={bundle.finding.severity}, thinking={thinking})")
             try:
                 return await asyncio.wait_for(
                     _analyze_one(
