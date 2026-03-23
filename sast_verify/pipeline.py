@@ -22,6 +22,7 @@ def _no_anchor_verdict() -> Verdict:
     )
 
 
+
 def run(
     codebase: Path,
     findings_path: Path,
