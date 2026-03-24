@@ -62,6 +62,9 @@ def run(
             "confidence": verdict.confidence,
             "reason": verdict.reason,
             "evidence": [{"location": loc} for loc in verdict.evidence_locations],
+            "claude_verdict_agrees": verdict.claude_verdict_agrees,
+            "claude_vuln_agrees": verdict.claude_vuln_agrees,
+            "claude_reason": verdict.claude_reason,
         }
 
     output_path.write_text(json.dumps(raw, indent=2))

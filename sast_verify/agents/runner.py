@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
+import anthropic
 from pydantic_ai.usage import UsageLimits
 
 from ..config import get_config
@@ -309,6 +311,63 @@ async def _analyze_one(
     return verdict
 
 
+_CLAUDE_VALIDATION_MODEL = "claude-sonnet-4-6"
+
+_CLAUDE_VALIDATOR_SYSTEM = """\
+You are a senior security engineer reviewing an automated SAST finding analysis.
+Given the finding details and the verdict produced by another model, evaluate independently:
+1. Is the verdict (true_positive / false_positive / uncertain) correct?
+2. Is the is_security_vulnerability classification correct?
+3. Provide a concise reason covering both assessments.
+
+Respond in this exact JSON format (no markdown fences):
+{"verdict_agrees": true|false, "vuln_agrees": true|false, "reason": "..."}
+
+- "verdict_agrees": true if the verdict label is correct.
+- "vuln_agrees": true if the is_security_vulnerability flag is correct.
+- "reason": 1-3 sentences explaining your evaluation of both.
+"""
+
+
+async def _claude_validate(bundle: EvidenceBundle, verdict: Verdict) -> tuple[bool | None, bool | None, str | None]:
+    """Call Claude to validate the verdict for a finding. Returns (verdict_agrees, vuln_agrees, reason)."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        log.warning("ANTHROPIC_API_KEY not set — skipping Claude validation")
+        return None, None, None
+
+    finding = bundle.finding
+    user_message = (
+        f"Finding:\n"
+        f"  check_id: {finding.check_id}\n"
+        f"  path: {finding.path}:{finding.line}-{finding.end_line}\n"
+        f"  severity: {finding.severity}\n"
+        f"  message: {finding.message}\n"
+        f"  code snippet:\n{finding.lines}\n\n"
+        f"Verdict produced:\n"
+        f"  verdict: {verdict.verdict}\n"
+        f"  is_security_vulnerability: {verdict.is_security_vulnerability}\n"
+        f"  confidence: {verdict.confidence}\n"
+        f"  reason: {verdict.reason}\n"
+    )
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        response = await client.messages.create(
+            model=_CLAUDE_VALIDATION_MODEL,
+            max_tokens=512,
+            system=_CLAUDE_VALIDATOR_SYSTEM,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        raw = response.content[0].text.strip()
+        parsed = json.loads(raw)
+        print(f"Claude validation parsed response: {parsed}")
+        return bool(parsed["verdict_agrees"]), bool(parsed["vuln_agrees"]), str(parsed["reason"])
+    except Exception as exc:
+        log.warning("Claude validation failed: %s", exc)
+        return None, None, None
+
+
 async def analyze_all(
     bundles: list[EvidenceBundle],
     codebase: Path,
@@ -331,7 +390,7 @@ async def analyze_all(
             thinking = cfg.get_thinking_settings(bundle.finding.severity)
             print(f"Starting analysis for finding {index} (severity={bundle.finding.severity}, thinking={thinking})")
             try:
-                return await asyncio.wait_for(
+                verdict = await asyncio.wait_for(
                     _analyze_one(
                         analyzer, formatter,
                         bundle, codebase, index,
@@ -357,6 +416,18 @@ async def analyze_all(
                     confidence="low",
                     reason=f"Analysis error: {type(exc).__name__}",
                 )
+
+            verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(bundle, verdict)
+            verdict.claude_verdict_agrees = verdict_agrees
+            verdict.claude_vuln_agrees = vuln_agrees
+            verdict.claude_reason = claude_reason
+            if verdict_agrees is not None:
+                log.info(
+                    "Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s | reason=%s",
+                    index, verdict_agrees, vuln_agrees, claude_reason,
+                )
+            print(f"verdict: {verdict}")
+            return verdict
 
     tasks = [_bounded(i, b) for i, b in enumerate(bundles)]
     return await asyncio.gather(*tasks)

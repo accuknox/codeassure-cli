@@ -38,7 +38,15 @@ def main() -> None:
         "--verify", type=Path, default=None, metavar="FILE",
         help="Compare output against a ground-truth JSON (final_results.json) and write a CSV report",
     )
+    parser.add_argument(
+        "--anthropic-key", type=str, default=None, metavar="KEY",
+        help="Anthropic API key for Claude verdict validation (overrides ANTHROPIC_API_KEY env var)",
+    )
     args = parser.parse_args()
+
+    import os
+    if args.anthropic_key:
+        os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
 
     from .config import load_config
     from .pipeline import run, verify

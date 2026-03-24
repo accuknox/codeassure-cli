@@ -46,6 +46,7 @@ class Config(BaseModel):
     grep_max_scan_mb: int = Field(default=5, ge=1, description="Stop grep scanning after this many MB read")
     request_limit: int = Field(default=200, ge=1, description="Max requests per agent.run() call (reasoning models need more)")
     thinking_map: dict[str, ThinkingMode] | None = Field(
+        # default_factory=lambda: dict(_DEFAULT_THINKING_MAP),
         default=None,
         description="Severity → thinking effort mapping (e.g. {\"ERROR\": \"full\", \"WARNING\": \"low\", \"INFO\": \"off\"}). "
         "Set to null/omit to disable (no extra_body sent).",
