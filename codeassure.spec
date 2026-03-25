@@ -1,12 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for codeassure standalone binary
+from PyInstaller.utils.hooks import copy_metadata
 
 a = Analysis(
     ['build_entry.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        *copy_metadata('genai_prices'),
+    ],
     hiddenimports=[
+        # genai_prices (used by pydantic-ai messages.py at import time)
+        'genai_prices',
         # pydantic / pydantic-ai
         'pydantic',
         'pydantic.v1',
