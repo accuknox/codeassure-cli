@@ -8,6 +8,7 @@ a = Analysis(
     binaries=[],
     datas=[
         *copy_metadata('genai_prices'),
+        *copy_metadata('pydantic_ai_slim'),
     ],
     hiddenimports=[
         # genai_prices (used by pydantic-ai messages.py at import time)
