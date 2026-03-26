@@ -5,7 +5,8 @@ import json
 import logging
 from pathlib import Path
 
-from .agents.runner import analyze_all
+from .agents.runner import analyze_all, analyze_all_grouped
+from .grouping import build_groups
 from .preprocess import preprocess
 from .retrieval import retrieve
 from .schema import Verdict
@@ -29,6 +30,7 @@ def run(
     output_path: Path,
     concurrency: int = 4,
     severities: list[str] | None = ["INFO", "WARNING", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN", "NOT_AVAILABLE", "INFORMATIONAL"],
+    enable_grouping: bool = True,
 ) -> None:
     findings = preprocess(findings_path)
     bundles = [retrieve(finding, codebase) for finding in findings]
@@ -48,11 +50,23 @@ def run(
 
     if to_analyze:
         indices, analyzable = zip(*to_analyze)
-        llm_verdicts = asyncio.run(
-            analyze_all(list(analyzable), codebase=codebase, concurrency=concurrency)
-        )
-        for idx, verdict in zip(indices, llm_verdicts):
-            verdicts[idx] = verdict
+
+        if enable_grouping:
+            groups = build_groups(list(analyzable), list(indices))
+            co_located = sum(1 for g in groups if g.relationship == "co-located")
+            print(f"Grouped {len(analyzable)} findings into {len(groups)} groups "
+                  f"({co_located} co-located, {len(groups) - co_located} solo)")
+            verdict_map = asyncio.run(
+                analyze_all_grouped(groups, codebase=codebase, concurrency=concurrency)
+            )
+            for idx, verdict in verdict_map.items():
+                verdicts[idx] = verdict
+        else:
+            llm_verdicts = asyncio.run(
+                analyze_all(list(analyzable), codebase=codebase, concurrency=concurrency)
+            )
+            for idx, verdict in zip(indices, llm_verdicts):
+                verdicts[idx] = verdict
 
     raw = json.loads(findings_path.read_text(encoding="utf-8"))
     for result, verdict in zip(raw["results"], verdicts):

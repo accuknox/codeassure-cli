@@ -42,6 +42,10 @@ def main() -> None:
         "--anthropic-key", type=str, default=None, metavar="KEY",
         help="Anthropic API key for Claude verdict validation (overrides ANTHROPIC_API_KEY env var)",
     )
+    parser.add_argument(
+        "--grouping", action="store_true", default=False,
+        help="Enable finding grouping — analyze findings in groups (default behavior)",
+    )
     args = parser.parse_args()
 
     import os
@@ -57,7 +61,12 @@ def main() -> None:
     if concurrency < 1:
         parser.error("--jobs must be at least 1")
 
-    run(args.codebase, args.findings, args.output, concurrency=concurrency, severities=args.severity.split(","))
+    run(
+        args.codebase, args.findings, args.output,
+        concurrency=concurrency,
+        severities=args.severity.split(","),
+        enable_grouping=args.grouping,
+    )
 
     if args.verify:
         csv_path = args.output.with_suffix(".csv")
