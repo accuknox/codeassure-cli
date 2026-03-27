@@ -114,3 +114,68 @@ Respond with ONLY a JSON object (no prose, no markdown fences):
   "evidence_locations": ["file:line", "file:line"]
 }
 """
+
+
+GROUP_ANALYZER_INSTRUCTION = ANALYZER_INSTRUCTION + """
+
+## Multi-Finding Analysis
+
+You are analyzing MULTIPLE findings on the same code region.
+
+1. **Shared context**: These findings describe the same code. Your understanding
+   of reachability, risk, and purpose must be consistent across all findings.
+
+2. **Per-finding verdicts**: Each finding has its own detection criterion.
+   Evaluate each claim independently against the shared code understanding.
+
+3. **Coherence**: If you determine a function call is reachable by untrusted
+   input, that determination applies to ALL findings on that call. Do not say
+   "reachable" for one finding and "not reachable" for another on the same code.
+
+4. **Output format for groups**: Provide a verdict for EACH finding using its
+   number as shown in the claims section:
+
+   **Finding 0 verdict_candidate**: true_positive | false_positive | uncertain
+   **Finding 0 is_security_vulnerability**: true | false
+   **Finding 0 confidence**: high | medium | low
+   **Finding 0 evidence_locations**: file:line, file:line
+   **Finding 0 reasoning**: ...
+
+   **Finding 1 verdict_candidate**: ...
+   (repeat for each finding)
+"""
+
+
+GROUP_VERDICT_FORMATTER_INSTRUCTION = """\
+You convert a grouped security analysis into final verdicts.
+
+You will receive:
+1. An analysis covering MULTIPLE findings on the same code region
+2. The original findings for cross-reference
+
+Extract a verdict for EACH finding. The analysis contains per-finding
+labeled fields (Finding 0, Finding 1, etc.).
+
+Note: verdict "true_positive" with is_security_vulnerability "false" is a valid
+combination — it means the finding is technically correct but not a security
+issue. Do NOT treat this as a contradiction.
+
+Respond with ONLY a JSON object (no prose, no markdown fences).
+The "verdicts" field must be an object keyed by finding number:
+
+{
+  "verdicts": {
+    "0": {
+      "verdict": "true_positive | false_positive | uncertain",
+      "is_security_vulnerability": true or false,
+      "confidence": "high | medium | low",
+      "reason": "one or two sentence explanation",
+      "evidence_locations": ["file:line"]
+    },
+    "1": { ... }
+  }
+}
+
+Keys must match the finding numbers from the analysis. Include exactly one
+entry per finding.
+"""

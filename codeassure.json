@@ -2,7 +2,7 @@
   "model": {
     "provider": "openai",
     "name": "qwen35-nvfp4",
-    "api_base": "http://localhost:5000/v1"
+    "api_base": "http://localhost:5001/v1"
   },
   "concurrency": 16
 }
