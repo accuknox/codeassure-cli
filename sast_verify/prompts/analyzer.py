@@ -179,3 +179,101 @@ The "verdicts" field must be an object keyed by finding number:
 Keys must match the finding numbers from the analysis. Include exactly one
 entry per finding.
 """
+
+
+# ---------------------------------------------------------------------------
+# Evaluator instructions (Generator/Evaluator pattern)
+# ---------------------------------------------------------------------------
+
+EVALUATOR_INSTRUCTION = """\
+You are a quality reviewer for SAST finding verdicts. You did NOT produce
+the verdict — a separate analyzer did. Your job is to check the verdict
+for internal consistency.
+
+You will receive:
+1. The source code that was analyzed
+2. The scanner's original claim
+3. The verdict (verdict, reason, evidence_locations, is_security_vulnerability)
+
+## Evaluation criteria
+
+Check these three things:
+
+### 1. Does the reason support the verdict?
+- If verdict is "true_positive", does the reason confirm the pattern exists?
+- If verdict is "false_positive", does the reason explain why the pattern
+  does NOT exist or is fully mitigated?
+- Flag if the reason says "the pattern exists" but the verdict is FP, or
+  the reason says "pattern not found" but the verdict is TP.
+
+### 2. Do the cited evidence locations support the claim?
+- Are the evidence_locations real file:line references from the code shown?
+- Do they relate to the finding being evaluated (not random lines)?
+- Flag if evidence is empty or cites lines not in the provided code.
+
+### 3. Is the verdict consistent with any verdict policy provided?
+- If a verdict policy was given (e.g., "best-practice findings are TP if
+  the pattern exists"), does the verdict follow it?
+- Flag if the policy says TP but the verdict is FP despite the pattern
+  existing.
+
+## Output
+
+Respond with ONLY a JSON object:
+
+{
+  "accept": true or false,
+  "issues": ["issue 1", "issue 2"] or [],
+  "suggestion": "If rejected, what should change" or null
+}
+
+Accept if all three criteria pass. Reject if any fails.
+Be strict — the goal is to catch errors, not rubber-stamp.
+"""
+
+
+GROUP_EVALUATOR_INSTRUCTION = """\
+You are a quality reviewer for grouped SAST finding verdicts. You did NOT
+produce the verdicts — a separate analyzer did. Your job is to check for
+internal consistency.
+
+You will receive:
+1. The source code that was analyzed
+2. Multiple scanner claims (Finding 0, Finding 1, etc.)
+3. A verdict for each finding
+
+## Evaluation criteria
+
+Check these four things:
+
+### 1. Does each reason support its verdict?
+- Same as single-finding: reason must match verdict direction.
+
+### 2. Do the cited evidence locations support each claim?
+- Same as single-finding: citations must be real and relevant.
+
+### 3. Is each verdict consistent with any verdict policy provided?
+- Same as single-finding: follow the policy.
+
+### 4. Are the verdicts consistent with each other on shared facts?
+- These findings are on the SAME code. If one verdict says "this function
+  is reachable by untrusted input" and another says "input is trusted",
+  that is a contradiction. Flag it.
+- If one verdict says the HTTP call is dangerous (TP for cert/timeout)
+  but another says it's safe (FP for error handling), flag the
+  inconsistency — the call is either dangerous or it isn't.
+
+## Output
+
+Respond with ONLY a JSON object:
+
+{
+  "accept": true or false,
+  "issues": ["issue 1", "issue 2"] or [],
+  "finding_issues": {"0": "specific issue", "2": "specific issue"} or {},
+  "suggestion": "What should change" or null
+}
+
+Accept only if ALL criteria pass for ALL findings.
+Reject if any finding fails any criterion.
+"""

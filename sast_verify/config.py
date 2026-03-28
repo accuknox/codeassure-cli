@@ -37,14 +37,31 @@ class ModelConfig(BaseModel):
     api_base: str | None = Field(default=None, description="API base URL (for self-hosted endpoints)")
 
 
+class FindingPolicy(BaseModel):
+    """Controls what the model considers a true positive."""
+    best_practice_is_tp: bool = Field(
+        default=True,
+        description="Treat best-practice findings (missing timeout, missing encoding, mutable defaults) as TP if the pattern exists",
+    )
+    informational_detection_is_tp: bool = Field(
+        default=True,
+        description="Treat informational detection findings (detect-openai, detect-anthropic) as TP if the library is used",
+    )
+    audit_rule_is_tp: bool = Field(
+        default=True,
+        description="Treat audit-rule findings (subprocess usage, pickle usage) as TP if the call exists, regardless of input trust",
+    )
+
+
 class Config(BaseModel):
     model: ModelConfig
     concurrency: int = Field(default=4, ge=1)
-    stage_timeout: int = Field(default=120, ge=10, description="Seconds per LLM stage (analyzer or formatter)")
-    finding_timeout: int = Field(default=300, ge=30, description="Seconds for the entire finding (both stages + repair)")
+    stage_timeout: int = Field(default=240, ge=10, description="Seconds per LLM stage (analyzer or formatter)")
+    finding_timeout: int = Field(default=600, ge=30, description="Seconds for the entire finding (both stages + repair)")
     grep_max_file_kb: int = Field(default=512, ge=1, description="Skip files larger than this in grep (KB)")
     grep_max_scan_mb: int = Field(default=5, ge=1, description="Stop grep scanning after this many MB read")
     request_limit: int = Field(default=200, ge=1, description="Max requests per agent.run() call (reasoning models need more)")
+    finding_policy: FindingPolicy = Field(default_factory=FindingPolicy, description="Controls what counts as true_positive")
     thinking_map: dict[str, ThinkingMode] | None = Field(
         default=None,
         description="Severity → thinking effort mapping (e.g. {\"ERROR\": \"full\", \"WARNING\": \"low\", \"INFO\": \"off\"}). "

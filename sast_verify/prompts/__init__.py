@@ -8,6 +8,41 @@ if TYPE_CHECKING:
     from ..grouping import FindingGroup
 
 
+def _get_finding_policy_note() -> str | None:
+    """Build a verdict policy note from the active config's finding_policy.
+
+    Returns None if all policy flags are False (security-only mode).
+    """
+    from ..config import get_config
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        return None
+
+    policy = cfg.finding_policy
+    tp_types = []
+    if policy.best_practice_is_tp:
+        tp_types.append("best-practice (missing timeout, missing encoding, mutable defaults, missing error handling)")
+    if policy.informational_detection_is_tp:
+        tp_types.append("informational detection (library/framework usage detection)")
+    if policy.audit_rule_is_tp:
+        tp_types.append("audit rules (subprocess usage, pickle usage, shell=True)")
+
+    if not tp_types:
+        return None
+
+    joined = "; ".join(tp_types)
+    return (
+        f"## Verdict Policy\n"
+        f"This organization treats the following finding types as **true_positive** "
+        f"if the detected pattern exists in the code: {joined}. "
+        f"A finding is **false_positive** ONLY if the detected pattern does not "
+        f"exist in the code. Do not downgrade a finding to false_positive because "
+        f"it is \"merely best practice\" or \"not exploitable\" — if the pattern "
+        f"exists, it is true_positive."
+    )
+
+
 def build_user_message(bundle: EvidenceBundle) -> str:
     f = bundle.finding
 
@@ -35,6 +70,10 @@ def build_user_message(bundle: EvidenceBundle) -> str:
         parts.append(f"- **taint_sink**: `{f.taint_sink}`")
     if f.fix:
         parts.append(f"- **suggested_fix**: {f.fix}")
+
+    policy_note = _get_finding_policy_note()
+    if policy_note:
+        parts.append(f"\n{policy_note}")
 
     return "\n".join(parts)
 
@@ -110,6 +149,11 @@ def build_group_message(group: FindingGroup) -> str:
     for i, bundle in enumerate(group.bundles):
         parts.extend(_finding_claim_block(i, bundle))
 
+    # Verdict policy
+    policy_note = _get_finding_policy_note()
+    if policy_note:
+        parts.append(f"\n{policy_note}")
+
     # Output instruction
     parts.append(f"\n## Output")
     parts.append(
@@ -140,5 +184,90 @@ def build_group_formatter_message(analysis: str, group: FindingGroup) -> str:
         parts.append(f"- **claim**: {f.message}")
 
     parts.append(f"\nReturn verdicts for all {n} findings (keys 0 through {n - 1}).")
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Evaluator message builders
+# ---------------------------------------------------------------------------
+
+
+def build_evaluator_message(
+    bundle: EvidenceBundle,
+    verdict: "Verdict",
+) -> str:
+    """Build message for the evaluator to review a single verdict."""
+    from ..schema import Verdict as _V  # avoid circular at module level
+
+    f = bundle.finding
+    parts = []
+
+    # Source code
+    parts.append("## Source Code")
+    for ev in bundle.evidence:
+        parts.append(f"### {ev.path} (lines {ev.start_line}–{ev.end_line})")
+        parts.append(f"```\n{ev.content}\n```")
+
+    # Scanner claim
+    parts.append("\n## Scanner Claim")
+    parts.append(f"- **check_id**: {f.check_id}")
+    parts.append(f"- **path**: {f.path}:{f.line}")
+    parts.append(f"- **claim**: {f.message}")
+    parts.append(f"- **flagged code**: `{f.lines}`")
+
+    # Verdict policy (if active)
+    policy_note = _get_finding_policy_note()
+    if policy_note:
+        parts.append(f"\n{policy_note}")
+
+    # Verdict to review
+    parts.append("\n## Verdict to Review")
+    parts.append(f"- **verdict**: {verdict.verdict}")
+    parts.append(f"- **is_security_vulnerability**: {verdict.is_security_vulnerability}")
+    parts.append(f"- **confidence**: {verdict.confidence}")
+    parts.append(f"- **reason**: {verdict.reason}")
+    parts.append(f"- **evidence_locations**: {verdict.evidence_locations}")
+
+    return "\n".join(parts)
+
+
+def build_group_evaluator_message(
+    group: "FindingGroup",
+    verdicts: dict[str, "Verdict"],
+) -> str:
+    """Build message for the evaluator to review grouped verdicts."""
+    parts = []
+
+    # Shared code
+    parts.append("## Source Code")
+    for ev in group.shared_evidence:
+        parts.append(f"### {ev.path} (lines {ev.start_line}–{ev.end_line})")
+        parts.append(f"```\n{ev.content}\n```")
+
+    # Scanner claims
+    n = len(group.bundles)
+    parts.append(f"\n## Scanner Claims ({n} findings)")
+    for i, bundle in enumerate(group.bundles):
+        parts.extend(_finding_claim_block(i, bundle))
+
+    # Verdict policy
+    policy_note = _get_finding_policy_note()
+    if policy_note:
+        parts.append(f"\n{policy_note}")
+
+    # Verdicts to review
+    parts.append(f"\n## Verdicts to Review")
+    for i in range(n):
+        key = str(i)
+        v = verdicts.get(key)
+        if v is None:
+            continue
+        parts.append(f"\n### Finding {i}")
+        parts.append(f"- **verdict**: {v.verdict}")
+        parts.append(f"- **is_security_vulnerability**: {v.is_security_vulnerability}")
+        parts.append(f"- **confidence**: {v.confidence}")
+        parts.append(f"- **reason**: {v.reason}")
+        parts.append(f"- **evidence_locations**: {v.evidence_locations}")
 
     return "\n".join(parts)

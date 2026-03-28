@@ -23,6 +23,68 @@ def _no_anchor_verdict() -> Verdict:
     )
 
 
+def _checkpoint_path(output_path: Path) -> Path:
+    """Checkpoint file sits next to the output file."""
+    return output_path.with_suffix(".checkpoint.json")
+
+
+def _load_checkpoint(output_path: Path) -> dict[int, Verdict]:
+    """Load previously saved verdicts from checkpoint file."""
+    cp = _checkpoint_path(output_path)
+    if not cp.is_file():
+        return {}
+
+    try:
+        data = json.loads(cp.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        log.warning("Corrupt checkpoint file, starting fresh")
+        return {}
+
+    loaded: dict[int, Verdict] = {}
+    for idx_str, v in data.items():
+        try:
+            loaded[int(idx_str)] = Verdict.model_validate(v)
+        except Exception:
+            continue
+
+    log.info("Loaded %d verdicts from checkpoint", len(loaded))
+    return loaded
+
+
+def _save_checkpoint(output_path: Path, verdicts: dict[int, Verdict]) -> None:
+    """Save verdicts to checkpoint file."""
+    cp = _checkpoint_path(output_path)
+    data = {
+        str(idx): {
+            "verdict": v.verdict,
+            "is_security_vulnerability": v.is_security_vulnerability,
+            "confidence": v.confidence,
+            "reason": v.reason,
+            "evidence_locations": v.evidence_locations,
+        }
+        for idx, v in verdicts.items()
+    }
+    cp.write_text(json.dumps(data, indent=2))
+
+
+def _write_output(
+    findings_path: Path,
+    output_path: Path,
+    verdicts: list[Verdict],
+) -> None:
+    """Merge verdicts into original findings JSON and write output."""
+    raw = json.loads(findings_path.read_text(encoding="utf-8"))
+    for result, verdict in zip(raw["results"], verdicts):
+        result["verification"] = {
+            "verdict": verdict.verdict,
+            "is_security_vulnerability": verdict.is_security_vulnerability,
+            "confidence": verdict.confidence,
+            "reason": verdict.reason,
+            "evidence": [{"location": loc} for loc in verdict.evidence_locations],
+        }
+    output_path.write_text(json.dumps(raw, indent=2))
+
+
 def run(
     codebase: Path,
     findings_path: Path,
@@ -41,34 +103,51 @@ def run(
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
 
+    # Load checkpoint — skip already-completed findings
+    checkpoint = _load_checkpoint(output_path)
+    for idx, verdict in checkpoint.items():
+        if idx < len(verdicts):
+            verdicts[idx] = verdict
+
+    # Filter out already-completed findings
+    if checkpoint:
+        remaining = [(i, b) for i, b in to_analyze if i not in checkpoint]
+        log.info(
+            "Resuming: %d/%d already done, %d remaining",
+            len(to_analyze) - len(remaining), len(to_analyze), len(remaining),
+        )
+        to_analyze = remaining
+
     if to_analyze:
         indices, analyzable = zip(*to_analyze)
 
         if enable_grouping:
             groups = build_groups(list(analyzable), list(indices))
             verdict_map = asyncio.run(
-                analyze_all_grouped(groups, codebase=codebase, concurrency=concurrency)
+                analyze_all_grouped(
+                    groups, codebase=codebase, concurrency=concurrency,
+                    checkpoint=checkpoint, output_path=output_path,
+                )
             )
             for idx, verdict in verdict_map.items():
                 verdicts[idx] = verdict
         else:
             llm_verdicts = asyncio.run(
-                analyze_all(list(analyzable), codebase=codebase, concurrency=concurrency)
+                analyze_all(
+                    list(analyzable), codebase=codebase, concurrency=concurrency,
+                    checkpoint=checkpoint, output_path=output_path,
+                )
             )
             for idx, verdict in zip(indices, llm_verdicts):
                 verdicts[idx] = verdict
 
-    raw = json.loads(findings_path.read_text(encoding="utf-8"))
-    for result, verdict in zip(raw["results"], verdicts):
-        result["verification"] = {
-            "verdict": verdict.verdict,
-            "is_security_vulnerability": verdict.is_security_vulnerability,
-            "confidence": verdict.confidence,
-            "reason": verdict.reason,
-            "evidence": [{"location": loc} for loc in verdict.evidence_locations],
-        }
+    _write_output(findings_path, output_path, verdicts)
 
-    output_path.write_text(json.dumps(raw, indent=2))
+    # Clean up checkpoint on successful completion
+    cp = _checkpoint_path(output_path)
+    if cp.is_file():
+        cp.unlink()
+        log.info("Checkpoint removed (run complete)")
 
 
 def verify(

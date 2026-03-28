@@ -10,11 +10,19 @@ from pydantic_ai.usage import UsageLimits
 
 from ..config import get_config
 from ..grouping import FindingGroup
-from ..prompts import build_formatter_message, build_group_message, build_user_message
+from ..prompts import (
+    build_evaluator_message,
+    build_formatter_message,
+    build_group_evaluator_message,
+    build_group_message,
+    build_user_message,
+)
 from ..schema import Evidence, EvidenceBundle, Verdict
 from .analyzer import (
     build_analyzer,
+    build_evaluator,
     build_group_analyzer,
+    build_group_evaluator,
     build_group_verdict_formatter,
     build_verdict_formatter,
 )
@@ -276,6 +284,49 @@ def _validate_evidence(
 
 
 # ---------------------------------------------------------------------------
+# Evaluator (Generator/Evaluator pattern)
+# ---------------------------------------------------------------------------
+
+
+async def _run_evaluator(
+    evaluator,
+    eval_message: str,
+    formatter_kwargs: dict,
+    stage_timeout: float,
+    label: str = "",
+) -> dict | None:
+    """Run the evaluator agent. Returns parsed evaluation or None."""
+    try:
+        result = await asyncio.wait_for(
+            evaluator.run(eval_message, **formatter_kwargs),
+            timeout=stage_timeout,
+        )
+        response = result.output.strip()
+        if not response:
+            return None
+
+        # Parse evaluator JSON response
+        decoder = json.JSONDecoder()
+        idx = 0
+        while idx < len(response):
+            pos = response.find("{", idx)
+            if pos == -1:
+                break
+            try:
+                obj, end = decoder.raw_decode(response, pos)
+            except json.JSONDecodeError:
+                idx = pos + 1
+                continue
+            if isinstance(obj, dict) and "accept" in obj:
+                return obj
+            idx = end
+        return None
+    except (asyncio.TimeoutError, Exception) as exc:
+        log.warning("%s: evaluator failed: %s", label, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Single-verdict parsing
 # ---------------------------------------------------------------------------
 
@@ -427,18 +478,13 @@ def _parse_group_verdicts(text: str, expected_keys: list[str]) -> dict[str, Verd
 # ---------------------------------------------------------------------------
 
 
-async def _analyze_one(
-    analyzer,
-    formatter,
-    bundle: EvidenceBundle,
-    codebase: Path,
-    index: int,
-    stage_timeout: float = 120,
-    grep_max_file_size: int = MAX_GREP_FILE_SIZE_DEFAULT,
-    grep_max_bytes: int = MAX_GREP_BYTES_DEFAULT,
-    request_limit: int = 200,
-    thinking_settings: dict | None = None,
-) -> Verdict:
+async def _generate_verdict(
+    analyzer, formatter, bundle, codebase, index,
+    stage_timeout, grep_max_file_size, grep_max_bytes,
+    request_limit, thinking_settings,
+    retry_hint: str | None = None,
+) -> Verdict | None:
+    """Single generation pass: analyzer → formatter → parse. Returns Verdict or None."""
     label = f"Finding {index}"
     deps = _build_deps(codebase, bundle.finding.path, grep_max_file_size, grep_max_bytes)
     run_kwargs, formatter_kwargs = _build_run_kwargs(
@@ -446,12 +492,17 @@ async def _analyze_one(
         label=f"{label} [{bundle.finding.severity}]",
     )
 
+    # Build message, optionally with evaluator feedback
+    user_message = build_user_message(bundle)
+    if retry_hint:
+        user_message += f"\n\n## Previous Attempt Feedback\n{retry_hint}"
+
     # Stage 1: Analyzer
     analysis = await _run_analyzer_stage(
-        analyzer, build_user_message(bundle), run_kwargs, stage_timeout, label,
+        analyzer, user_message, run_kwargs, stage_timeout, label,
     )
     if analysis is None:
-        return _uncertain("Analyzer produced no output or failed.")
+        return None, None, {}
 
     accessed_paths = deps.accessed_paths
 
@@ -468,8 +519,7 @@ async def _analyze_one(
     )
 
     if verdict is None:
-        log.error("%s: all parse attempts failed", label)
-        return _uncertain("Could not extract a valid verdict from LLM output.")
+        return None, None, accessed_paths
 
     # Validate evidence
     if bundle.evidence:
@@ -481,7 +531,71 @@ async def _analyze_one(
         verdict.evidence_locations, accessed_paths,
         bundle.finding.path, finding_start, finding_end,
     )
-    return verdict
+    return verdict, formatter_kwargs, accessed_paths
+
+
+async def _analyze_one(
+    analyzer,
+    formatter,
+    bundle: EvidenceBundle,
+    codebase: Path,
+    index: int,
+    stage_timeout: float = 120,
+    grep_max_file_size: int = MAX_GREP_FILE_SIZE_DEFAULT,
+    grep_max_bytes: int = MAX_GREP_BYTES_DEFAULT,
+    request_limit: int = 200,
+    thinking_settings: dict | None = None,
+    evaluator=None,
+    max_attempts: int = 2,
+) -> Verdict:
+    label = f"Finding {index}"
+
+    retry_hint = None
+    for attempt in range(max_attempts):
+        result = await _generate_verdict(
+            analyzer, formatter, bundle, codebase, index,
+            stage_timeout, grep_max_file_size, grep_max_bytes,
+            request_limit, thinking_settings,
+            retry_hint=retry_hint,
+        )
+
+        if result is None or result[0] is None:
+            if attempt == 0:
+                log.error("%s: generation failed (attempt %d)", label, attempt + 1)
+                return _uncertain("Analyzer produced no output or failed.")
+            break
+
+        verdict, formatter_kwargs, accessed_paths = result
+
+        # Skip evaluator on last attempt or if no evaluator
+        if evaluator is None or attempt == max_attempts - 1:
+            return verdict
+
+        # Stage 3: Evaluator reviews the verdict
+        eval_message = build_evaluator_message(bundle, verdict)
+        evaluation = await _run_evaluator(
+            evaluator, eval_message, formatter_kwargs, stage_timeout, label,
+        )
+
+        if evaluation is None or evaluation.get("accept", True):
+            # Evaluator accepts or couldn't run — use this verdict
+            if evaluation and evaluation.get("accept"):
+                log.info("%s: evaluator accepted (attempt %d)", label, attempt + 1)
+            return verdict
+
+        # Evaluator rejected — retry with feedback
+        issues = evaluation.get("issues", [])
+        suggestion = evaluation.get("suggestion", "")
+        feedback_parts = []
+        if issues:
+            feedback_parts.append("Issues found: " + "; ".join(issues))
+        if suggestion:
+            feedback_parts.append(f"Suggestion: {suggestion}")
+        retry_hint = " ".join(feedback_parts)
+        log.info("%s: evaluator rejected (attempt %d): %s", label, attempt + 1, retry_hint[:100])
+
+    # Should not reach here, but safety net
+    return verdict if verdict else _uncertain("All attempts failed.")
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +619,8 @@ async def _analyze_one_group(
     grep_max_bytes: int = MAX_GREP_BYTES_DEFAULT,
     request_limit: int = 200,
     thinking_settings: dict | None = None,
+    evaluator=None,
+    max_attempts: int = 2,
 ) -> dict[int, Verdict]:
     """Analyze a group of co-located findings together.
 
@@ -523,6 +639,8 @@ async def _analyze_one_group(
             grep_max_bytes=grep_max_bytes,
             request_limit=request_limit,
             thinking_settings=thinking_settings,
+            evaluator=evaluator,
+            max_attempts=max_attempts,
         )
         return {group.original_indices[0]: verdict}
 
@@ -610,6 +728,21 @@ async def _analyze_one_group(
         )
         result[orig_idx] = verdict
 
+    # Stage 3: Group evaluator (checks cross-finding consistency)
+    if evaluator is not None:
+        eval_message = build_group_evaluator_message(group, verdicts_by_key)
+        evaluation = await _run_evaluator(
+            evaluator, eval_message, formatter_kwargs, group_timeout, label,
+        )
+
+        if evaluation and not evaluation.get("accept", True):
+            issues = evaluation.get("issues", [])
+            suggestion = evaluation.get("suggestion", "")
+            log.info("%s: group evaluator rejected: %s", label, "; ".join(issues)[:100])
+
+            # TODO: full group retry is expensive — for now, log the rejection
+            # and return the verdicts as-is. Future: re-run with evaluator feedback.
+
     return result
 
 
@@ -618,10 +751,20 @@ async def _analyze_one_group(
 # ---------------------------------------------------------------------------
 
 
+def _save_checkpoint_sync(output_path: Path | None, checkpoint: dict[int, Verdict]) -> None:
+    """Save checkpoint to disk (called from async context)."""
+    if output_path is None:
+        return
+    from ..pipeline import _save_checkpoint
+    _save_checkpoint(output_path, checkpoint)
+
+
 async def analyze_all(
     bundles: list[EvidenceBundle],
     codebase: Path,
     concurrency: int = DEFAULT_CONCURRENCY,
+    checkpoint: dict[int, Verdict] | None = None,
+    output_path: Path | None = None,
 ) -> list[Verdict]:
     """Analyze findings individually (legacy path, used with --no-grouping)."""
     cfg = get_config()
@@ -631,16 +774,22 @@ async def analyze_all(
     grep_max_bytes = cfg.grep_max_scan_mb * 1024 * 1024
     request_limit = cfg.request_limit
 
+    if checkpoint is None:
+        checkpoint = {}
+
     analyzer = build_analyzer()
     formatter = build_verdict_formatter()
+    evaluator = build_evaluator()
 
     semaphore = asyncio.Semaphore(concurrency)
+    completed = 0
 
     async def _bounded(index: int, bundle: EvidenceBundle) -> Verdict:
+        nonlocal completed
         async with semaphore:
             thinking = cfg.get_thinking_settings(bundle.finding.severity)
             try:
-                return await asyncio.wait_for(
+                verdict = await asyncio.wait_for(
                     _analyze_one(
                         analyzer, formatter,
                         bundle, codebase, index,
@@ -649,24 +798,40 @@ async def analyze_all(
                         grep_max_bytes=grep_max_bytes,
                         request_limit=request_limit,
                         thinking_settings=thinking,
+                        evaluator=evaluator,
                     ),
                     timeout=finding_timeout,
                 )
             except asyncio.TimeoutError:
                 log.error("Finding %d timed out after %ds", index, finding_timeout)
-                return _uncertain(f"Analysis timed out after {finding_timeout}s.")
+                verdict = _uncertain(f"Analysis timed out after {finding_timeout}s.")
             except Exception as exc:
                 log.error("Finding %d failed: %s", index, exc)
-                return _uncertain(f"Analysis error: {type(exc).__name__}")
+                verdict = _uncertain(f"Analysis error: {type(exc).__name__}")
+
+            # Save incrementally
+            checkpoint[index] = verdict
+            completed += 1
+            if completed % 5 == 0:
+                _save_checkpoint_sync(output_path, checkpoint)
+                log.info("Checkpoint saved: %d findings complete", len(checkpoint))
+            return verdict
 
     tasks = [_bounded(i, b) for i, b in enumerate(bundles)]
-    return await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
+
+    # Final checkpoint save
+    _save_checkpoint_sync(output_path, checkpoint)
+
+    return results
 
 
 async def analyze_all_grouped(
     groups: list[FindingGroup],
     codebase: Path,
     concurrency: int = DEFAULT_CONCURRENCY,
+    checkpoint: dict[int, Verdict] | None = None,
+    output_path: Path | None = None,
 ) -> dict[int, Verdict]:
     """Analyze finding groups, return verdicts keyed by original finding index."""
     cfg = get_config()
@@ -676,15 +841,22 @@ async def analyze_all_grouped(
     grep_max_bytes = cfg.grep_max_scan_mb * 1024 * 1024
     request_limit = cfg.request_limit
 
+    if checkpoint is None:
+        checkpoint = {}
+
     # Solo groups use single-finding agents, multi-finding groups use group agents
     single_analyzer = build_analyzer()
     single_formatter = build_verdict_formatter()
+    single_evaluator = build_evaluator()
     group_analyzer = build_group_analyzer()
     group_formatter = build_group_verdict_formatter()
+    group_eval = build_group_evaluator()
 
     semaphore = asyncio.Semaphore(concurrency)
+    groups_done = 0
 
     async def _bounded(gi: int, group: FindingGroup) -> dict[int, Verdict]:
+        nonlocal groups_done
         async with semaphore:
             # Thinking: use highest severity in group
             severities = [b.finding.severity for b in group.bundles]
@@ -694,15 +866,15 @@ async def analyze_all_grouped(
 
             # Pick agents based on group size
             if len(group.bundles) == 1:
-                az, fm = single_analyzer, single_formatter
+                az, fm, ev = single_analyzer, single_formatter, single_evaluator
             else:
-                az, fm = group_analyzer, group_formatter
+                az, fm, ev = group_analyzer, group_formatter, group_eval
 
             # Timeout scales with group size
             group_finding_timeout = finding_timeout + 60 * (len(group.bundles) - 1)
 
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     _analyze_one_group(
                         az, fm, group, codebase, gi,
                         stage_timeout=stage_timeout,
@@ -710,20 +882,32 @@ async def analyze_all_grouped(
                         grep_max_bytes=grep_max_bytes,
                         request_limit=request_limit,
                         thinking_settings=thinking,
+                        evaluator=ev,
                     ),
                     timeout=group_finding_timeout,
                 )
             except asyncio.TimeoutError:
                 log.error("Group %d timed out after %ds", gi, group_finding_timeout)
-                return {idx: _uncertain(f"Group timed out after {group_finding_timeout}s.")
-                        for idx in group.original_indices}
+                result = {idx: _uncertain(f"Group timed out after {group_finding_timeout}s.")
+                          for idx in group.original_indices}
             except Exception as exc:
                 log.error("Group %d failed: %s", gi, exc)
-                return {idx: _uncertain(f"Group error: {type(exc).__name__}")
-                        for idx in group.original_indices}
+                result = {idx: _uncertain(f"Group error: {type(exc).__name__}")
+                          for idx in group.original_indices}
+
+            # Save incrementally
+            checkpoint.update(result)
+            groups_done += 1
+            if groups_done % 5 == 0:
+                _save_checkpoint_sync(output_path, checkpoint)
+                log.info("Checkpoint saved: %d findings complete (%d groups)", len(checkpoint), groups_done)
+            return result
 
     tasks = [_bounded(gi, g) for gi, g in enumerate(groups)]
     results = await asyncio.gather(*tasks)
+
+    # Final checkpoint save
+    _save_checkpoint_sync(output_path, checkpoint)
 
     # Merge all group results into a single dict
     merged: dict[int, Verdict] = {}
