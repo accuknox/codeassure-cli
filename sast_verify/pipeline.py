@@ -171,11 +171,7 @@ def verify(
         )
         return
 
-    # Confusion matrix counters — dual metrics
-    # Finding correctness: raw verdict (did the model agree with GT on detection accuracy?)
-    fc_tp = fc_fp = fc_tn = fc_fn = fc_uncertain = 0
-    # Security vulnerability: collapsed view (existing logic)
-    sv_tp = sv_fp = sv_tn = sv_fn = sv_uncertain = 0
+    tp = fp = tn = fn = uncertain = 0
     rows = []
 
     for i, (pr, tr) in enumerate(zip(pred_results, truth_results)):
@@ -194,41 +190,24 @@ def verify(
         severity = tr.get("extra", {}).get("severity", "")
         start_line = tr.get("start", {}).get("line", "")
 
-        # Finding correctness: raw verdict
-        finding_correctness = pred_verdict
-
-        # Security vulnerability: collapsed view (existing logic)
+        # Effective prediction: collapse TP + not_sec → FP
         if pred_verdict == "true_positive" and not pred_is_sec:
-            security_effective = "false_positive"
+            effective = "false_positive"
         else:
-            security_effective = pred_verdict
+            effective = pred_verdict
 
-        fc_match = finding_correctness == gt_label
-        sv_match = security_effective == gt_label
+        match = effective == gt_label
 
-        # Finding correctness confusion matrix
-        if finding_correctness == "uncertain":
-            fc_uncertain += 1
-        elif finding_correctness == "true_positive" and gt_label == "true_positive":
-            fc_tp += 1
-        elif finding_correctness == "false_positive" and gt_label == "false_positive":
-            fc_tn += 1
-        elif finding_correctness == "true_positive" and gt_label == "false_positive":
-            fc_fp += 1
-        elif finding_correctness == "false_positive" and gt_label == "true_positive":
-            fc_fn += 1
-
-        # Security vulnerability confusion matrix
-        if security_effective == "uncertain":
-            sv_uncertain += 1
-        elif security_effective == "true_positive" and gt_label == "true_positive":
-            sv_tp += 1
-        elif security_effective == "false_positive" and gt_label == "false_positive":
-            sv_tn += 1
-        elif security_effective == "true_positive" and gt_label == "false_positive":
-            sv_fp += 1
-        elif security_effective == "false_positive" and gt_label == "true_positive":
-            sv_fn += 1
+        if effective == "uncertain":
+            uncertain += 1
+        elif effective == "true_positive" and gt_label == "true_positive":
+            tp += 1
+        elif effective == "false_positive" and gt_label == "false_positive":
+            tn += 1
+        elif effective == "true_positive" and gt_label == "false_positive":
+            fp += 1
+        elif effective == "false_positive" and gt_label == "true_positive":
+            fn += 1
 
         rows.append({
             "index": i,
@@ -237,22 +216,19 @@ def verify(
             "line": start_line,
             "severity": severity,
             "ground_truth": gt_label,
-            "predicted": pred_verdict,
+            "verdict": pred_verdict,
             "is_security_vulnerability": pred_is_sec,
-            "finding_correctness": finding_correctness,
-            "security_effective": security_effective,
+            "effective": effective,
             "confidence": pred_conf,
-            "fc_match": "Y" if fc_match else "N",
-            "sv_match": "Y" if sv_match else "N",
+            "match": "Y" if match else "N",
             "ground_truth_reason": gt_reason,
             "predicted_reason": pred_reason,
         })
 
     fieldnames = [
         "index", "check_id", "path", "line", "severity",
-        "ground_truth", "predicted", "is_security_vulnerability",
-        "finding_correctness", "security_effective", "confidence",
-        "fc_match", "sv_match",
+        "ground_truth", "verdict", "is_security_vulnerability",
+        "effective", "confidence", "match",
         "ground_truth_reason", "predicted_reason",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -261,44 +237,30 @@ def verify(
         writer.writerows(rows)
 
     total = len(rows)
-
-    def _print_metrics(label, tp, tn, fp, fn, uncertain):
-        decided = tp + tn + fp + fn
-        correct = tp + tn
-        accuracy = (correct / decided * 100) if decided else 0.0
-        precision = (tp / (tp + fp) * 100) if (tp + fp) else 0.0
-        recall = (tp / (tp + fn) * 100) if (tp + fn) else 0.0
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
-        print(f"\n{'─'*60}")
-        print(f" {label}")
-        print(f"{'─'*60}")
-        print(f"   TP (real issue, said TP):     {tp:>4d}")
-        print(f"   TN (not issue, said FP):      {tn:>4d}")
-        print(f"   FP (not issue, said TP):      {fp:>4d}")
-        print(f"   FN (real issue, said FP):     {fn:>4d}")
-        print(f"   Uncertain:                    {uncertain:>4d}")
-        print(f"   Accuracy:  {accuracy:5.1f}%  ({correct}/{decided})")
-        print(f"   Precision: {precision:5.1f}%")
-        print(f"   Recall:    {recall:5.1f}%")
-        print(f"   F1:        {f1:5.1f}%")
-        return accuracy, decided, uncertain
+    decided = tp + tn + fp + fn
+    correct = tp + tn
+    accuracy = (correct / decided * 100) if decided else 0.0
+    precision = (tp / (tp + fp) * 100) if (tp + fp) else 0.0
+    recall = (tp / (tp + fn) * 100) if (tp + fn) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
 
     print(f"\n{'='*60}")
     print(f" Verification Report: {csv_path.name}")
     print(f"{'='*60}")
     print(f" Total findings: {total}")
-
-    _print_metrics(
-        "Finding Correctness (raw verdict vs GT)",
-        fc_tp, fc_tn, fc_fp, fc_fn, fc_uncertain,
-    )
-    sv_accuracy, sv_decided, sv_uncertain = _print_metrics(
-        "Security Vulnerability (collapsed: TP+not_sec → FP)",
-        sv_tp, sv_tn, sv_fp, sv_fn, sv_uncertain,
-    )
-
-    print(f"\n{'='*60}")
+    print(f"{'─'*60}")
+    print(f"   TP (real issue, said TP):     {tp:>4d}")
+    print(f"   TN (not issue, said FP):      {tn:>4d}")
+    print(f"   FP (not issue, said TP):      {fp:>4d}")
+    print(f"   FN (real issue, said FP):     {fn:>4d}")
+    print(f"   Uncertain:                    {uncertain:>4d}")
+    print(f"{'─'*60}")
+    print(f"   Accuracy:  {accuracy:5.1f}%  ({correct}/{decided})")
+    print(f"   Precision: {precision:5.1f}%")
+    print(f"   Recall:    {recall:5.1f}%")
+    print(f"   F1:        {f1:5.1f}%")
+    print(f"{'='*60}")
     print(f" CSV written to: {csv_path}")
 
-    log.info("Verification: sv_accuracy=%.1f%% (%d/%d), uncertain=%d",
-             sv_accuracy, sv_decided - sv_uncertain, sv_decided, sv_uncertain)
+    log.info("Verification: accuracy=%.1f%% (%d/%d), uncertain=%d",
+             accuracy, correct, decided, uncertain)
