@@ -16,3 +16,5 @@ llms-full.txt
 .vscode/
 *.swp
 .DS_Store
+
+build/
