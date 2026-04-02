@@ -858,6 +858,14 @@ async def analyze_all_grouped(
     if checkpoint is None:
         checkpoint = {}
 
+    solo = sum(1 for g in groups if len(g.bundles) == 1)
+    multi = len(groups) - solo
+    total_findings = sum(len(g.bundles) for g in groups)
+    print(f"[grouping] {len(groups)} group(s) from {total_findings} finding(s) — {solo} solo, {multi} multi-finding")
+    for gi, g in enumerate(groups):
+        if len(g.bundles) > 1:
+            print(f"  group {gi}: {g.group_key} — {len(g.bundles)} findings {g.original_indices}")
+
     # Solo groups use single-finding agents, multi-finding groups use group agents
     single_analyzer = build_analyzer()
     single_formatter = build_verdict_formatter()
@@ -912,7 +920,9 @@ async def analyze_all_grouped(
             for i, orig_idx in enumerate(group.original_indices):
                 bundle = group.bundles[i]
                 verdict = result[orig_idx]
-                verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(bundle, verdict)
+                verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(
+                    bundle, verdict, group=group, finding_index=i,
+                )
                 verdict.claude_verdict_agrees = verdict_agrees
                 verdict.claude_vuln_agrees = vuln_agrees
                 verdict.claude_reason = claude_reason
@@ -966,26 +976,33 @@ Respond in this exact JSON format (no markdown fences):
 """
 
 
-async def _claude_validate(bundle: EvidenceBundle, verdict: Verdict) -> tuple[bool | None, bool | None, str | None]:
+async def _claude_validate(
+    bundle: EvidenceBundle,
+    verdict: Verdict,
+    group: FindingGroup | None = None,
+    finding_index: int = 0,
+) -> tuple[bool | None, bool | None, str | None]:
     """Call Claude to validate the verdict for a finding. Returns (verdict_agrees, vuln_agrees, reason)."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         log.warning("ANTHROPIC_API_KEY not set — skipping Claude validation")
         return None, None, None
 
-    finding = bundle.finding
+    # Give Claude the same context Qwen received
+    if group is not None and len(group.bundles) > 1:
+        context = build_group_message(group)
+        verdict_header = f"## Verdict to Validate (Finding {finding_index})"
+    else:
+        context = build_user_message(bundle)
+        verdict_header = "## Verdict to Validate"
+
     user_message = (
-        f"Finding:\n"
-        f"  check_id: {finding.check_id}\n"
-        f"  path: {finding.path}:{finding.line}-{finding.end_line}\n"
-        f"  severity: {finding.severity}\n"
-        f"  message: {finding.message}\n"
-        f"  code snippet:\n{finding.lines}\n\n"
-        f"Verdict produced:\n"
-        f"  verdict: {verdict.verdict}\n"
-        f"  is_security_vulnerability: {verdict.is_security_vulnerability}\n"
-        f"  confidence: {verdict.confidence}\n"
-        f"  reason: {verdict.reason}\n"
+        f"{context}\n\n"
+        f"{verdict_header}\n"
+        f"- **verdict**: {verdict.verdict}\n"
+        f"- **is_security_vulnerability**: {verdict.is_security_vulnerability}\n"
+        f"- **confidence**: {verdict.confidence}\n"
+        f"- **reason**: {verdict.reason}\n"
     )
 
     try:
