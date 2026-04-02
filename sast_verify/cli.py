@@ -26,18 +26,31 @@ def main() -> None:
         help="Path to codeassure.json (default: ./codeassure.json)",
     )
     parser.add_argument(
+            "--severity","-s", type=str,
+            default="INFO,WARNING,LOW,MEDIUM,HIGH,CRITICAL,UNKNOWN,NOT_AVAILABLE,INFORMATIONAL",
+            help="Comma-separated list of severities to check for AI analysis. If any match, AI analysis will run on those findings."
+        )
+    parser.add_argument(
         "--jobs", "-j", type=int, default=None, metavar="N",
         help="Max concurrent LLM requests (overrides config)",
-    )
-    parser.add_argument(
-        "--no-grouping", action="store_true", default=False,
-        help="Disable finding grouping (analyze each finding independently)",
     )
     parser.add_argument(
         "--verify", type=Path, default=None, metavar="FILE",
         help="Compare output against a ground-truth JSON (final_results.json) and write a CSV report",
     )
+    parser.add_argument(
+        "--anthropic-key", type=str, default=None, metavar="KEY",
+        help="Anthropic API key for Claude verdict validation (overrides ANTHROPIC_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--grouping", action="store_true", default=False,
+        help="Enable finding grouping — analyze findings in groups (default behavior)",
+    )
     args = parser.parse_args()
+
+    import os
+    if args.anthropic_key:
+        os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
 
     from .config import load_config
     from .pipeline import run, verify
@@ -51,7 +64,8 @@ def main() -> None:
     run(
         args.codebase, args.findings, args.output,
         concurrency=concurrency,
-        enable_grouping=not args.no_grouping,
+        severities=args.severity.split(","),
+        enable_grouping=args.grouping,
     )
 
     if args.verify:

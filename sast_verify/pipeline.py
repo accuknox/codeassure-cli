@@ -75,13 +75,20 @@ def _write_output(
     """Merge verdicts into original findings JSON and write output."""
     raw = json.loads(findings_path.read_text(encoding="utf-8"))
     for result, verdict in zip(raw["results"], verdicts):
-        result["verification"] = {
+        verification: dict = {
             "verdict": verdict.verdict,
             "is_security_vulnerability": verdict.is_security_vulnerability,
             "confidence": verdict.confidence,
             "reason": verdict.reason,
             "evidence": [{"location": loc} for loc in verdict.evidence_locations],
         }
+        if verdict.claude_verdict_agrees is not None:
+            verification["claude_validation"] = {
+                "verdict_agrees": verdict.claude_verdict_agrees,
+                "vuln_agrees": verdict.claude_vuln_agrees,
+                "reason": verdict.claude_reason,
+            }
+        result["verification"] = verification
     output_path.write_text(json.dumps(raw, indent=2))
 
 
@@ -90,6 +97,7 @@ def run(
     findings_path: Path,
     output_path: Path,
     concurrency: int = 4,
+    severities: list[str] | None = ["INFO", "WARNING", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN", "NOT_AVAILABLE", "INFORMATIONAL"],
     enable_grouping: bool = True,
 ) -> None:
     findings = preprocess(findings_path)
@@ -98,8 +106,14 @@ def run(
     # Only anchored findings go to the agent; unanchored → deterministic uncertain
     verdicts: list[Verdict] = [_no_anchor_verdict()] * len(bundles)
     to_analyze = [(i, b) for i, b in enumerate(bundles) if b.evidence]
+    if severities is not None:
+        to_analyze = [
+            (i, b) for i, b in to_analyze
+            if (b.finding.impact or "NOT_AVAILABLE").upper() in severities
+        ]
 
     skipped = len(bundles) - len(to_analyze)
+    print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI")
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
 
