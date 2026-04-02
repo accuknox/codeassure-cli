@@ -1,8 +1,8 @@
 {
   "model": {
     "provider": "openai",
-    "name": "Qwen3.5-27B-Q4_K_M.gguf",
-    "api_base": "http://100.92.159.5:7913/v1"
+    "name": "qwen35-nvfp4",
+    "api_base": "http://localhost:5000/v1"
   },
   "concurrency": 4,
   "stage_timeout": 600,
