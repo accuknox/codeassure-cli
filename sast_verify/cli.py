@@ -46,9 +46,15 @@ def main() -> None:
         "--grouping", action="store_true", default=False,
         help="Enable finding grouping — analyze findings in groups (default behavior)",
     )
+    parser.add_argument(
+        "--claude-verification", action="store_true", default=False,
+        help="Enable Claude validation of verdicts (requires --anthropic-key or ANTHROPIC_API_KEY)",
+    )
     args = parser.parse_args()
 
+    import logging
     import os
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     if args.anthropic_key:
         os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
 
@@ -66,6 +72,7 @@ def main() -> None:
         concurrency=concurrency,
         severities=args.severity.split(","),
         enable_grouping=args.grouping,
+        claude_verification=args.claude_verification,
     )
 
     if args.verify:

@@ -31,6 +31,7 @@ def run(
     concurrency: int = 4,
     severities: list[str] | None = ["INFO", "WARNING", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN", "NOT_AVAILABLE", "INFORMATIONAL"],
     enable_grouping: bool = True,
+    claude_verification: bool = False,
 ) -> None:
     findings = preprocess(findings_path)
     bundles = [retrieve(finding, codebase) for finding in findings]
@@ -57,29 +58,35 @@ def run(
             print(f"Grouped {len(analyzable)} findings into {len(groups)} groups "
                   f"({co_located} co-located, {len(groups) - co_located} solo)")
             verdict_map = asyncio.run(
-                analyze_all_grouped(groups, codebase=codebase, concurrency=concurrency)
+                analyze_all_grouped(groups, codebase=codebase, concurrency=concurrency,
+                                    claude_verification=claude_verification)
             )
             for idx, verdict in verdict_map.items():
                 verdicts[idx] = verdict
         else:
             llm_verdicts = asyncio.run(
-                analyze_all(list(analyzable), codebase=codebase, concurrency=concurrency)
+                analyze_all(list(analyzable), codebase=codebase, concurrency=concurrency,
+                            claude_verification=claude_verification)
             )
             for idx, verdict in zip(indices, llm_verdicts):
                 verdicts[idx] = verdict
 
     raw = json.loads(findings_path.read_text(encoding="utf-8"))
     for result, verdict in zip(raw["results"], verdicts):
-        result["verification"] = {
+        verification: dict = {
             "verdict": verdict.verdict,
             "is_security_vulnerability": verdict.is_security_vulnerability,
             "confidence": verdict.confidence,
             "reason": verdict.reason,
             "evidence": [{"location": loc} for loc in verdict.evidence_locations],
-            "claude_verdict_agrees": verdict.claude_verdict_agrees,
-            "claude_vuln_agrees": verdict.claude_vuln_agrees,
-            "claude_reason": verdict.claude_reason,
         }
+        result["verification"] = verification
+        if claude_verification:
+            result["claude_validation"] = {
+                "verdict_agrees": verdict.claude_verdict_agrees,
+                "vuln_agrees": verdict.claude_vuln_agrees,
+                "reason": verdict.claude_reason,
+            }
 
     output_path.write_text(json.dumps(raw, indent=2))
 

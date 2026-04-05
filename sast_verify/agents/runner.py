@@ -628,6 +628,7 @@ async def analyze_all(
     bundles: list[EvidenceBundle],
     codebase: Path,
     concurrency: int = DEFAULT_CONCURRENCY,
+    claude_verification: bool = False,
 ) -> list[Verdict]:
     cfg = get_config()
     stage_timeout = cfg.stage_timeout
@@ -640,11 +641,14 @@ async def analyze_all(
     formatter = build_verdict_formatter()
 
     semaphore = asyncio.Semaphore(concurrency)
+    total = len(bundles)
+    counter = [0]
 
     async def _bounded(index: int, bundle: EvidenceBundle) -> Verdict:
         async with semaphore:
+            counter[0] += 1
             thinking = cfg.get_thinking_settings(bundle.finding.severity)
-            print(f"Starting analysis for finding {index} (severity={bundle.finding.severity}, thinking={thinking})")
+            print(f"Analysing {counter[0]}/{total} finding #{index}")
             try:
                 verdict = await asyncio.wait_for(
                     _analyze_one(
@@ -667,16 +671,16 @@ async def analyze_all(
                 return Verdict(verdict="uncertain", confidence="low",
                                reason=f"Analysis error: {type(exc).__name__}")
 
-            verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(bundle, verdict)
-            verdict.claude_verdict_agrees = verdict_agrees
-            verdict.claude_vuln_agrees = vuln_agrees
-            verdict.claude_reason = claude_reason
-            if verdict_agrees is not None:
-                log.info(
-                    "Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s | reason=%s",
-                    index, verdict_agrees, vuln_agrees, claude_reason,
-                )
-            print(f"verdict: {verdict}")
+            if claude_verification:
+                verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(bundle, verdict)
+                verdict.claude_verdict_agrees = verdict_agrees
+                verdict.claude_vuln_agrees = vuln_agrees
+                verdict.claude_reason = claude_reason
+                if verdict_agrees is not None:
+                    log.info(
+                        "Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s | reason=%s",
+                        index, verdict_agrees, vuln_agrees, claude_reason,
+                    )
             return verdict
 
     tasks = [_bounded(i, b) for i, b in enumerate(bundles)]
@@ -687,6 +691,7 @@ async def analyze_all_grouped(
     groups: list[FindingGroup],
     codebase: Path,
     concurrency: int = DEFAULT_CONCURRENCY,
+    claude_verification: bool = False,
 ) -> dict[int, Verdict]:
     """Semaphore-bounded grouped analysis. Returns dict[original_index → Verdict]."""
     cfg = get_config()
@@ -702,14 +707,17 @@ async def analyze_all_grouped(
     group_formatter = build_group_verdict_formatter()
 
     semaphore = asyncio.Semaphore(concurrency)
+    total = len(groups)
+    counter = [0]
 
     async def _bounded_group(group: FindingGroup) -> dict[int, Verdict]:
         async with semaphore:
+            counter[0] += 1
             if group.relationship == "solo":
                 bundle = group.bundles[0]
                 orig_idx = group.original_indices[0]
                 thinking = cfg.get_thinking_settings(bundle.finding.severity)
-                print(f"Starting analysis for finding {orig_idx} (severity={bundle.finding.severity}, solo)")
+                print(f"Analysing {counter[0]}/{total} finding #{orig_idx}")
                 try:
                     verdict = await asyncio.wait_for(
                         _analyze_one(
@@ -732,13 +740,13 @@ async def analyze_all_grouped(
                     verdict = Verdict(verdict="uncertain", confidence="low",
                                      reason=f"Analysis error: {type(exc).__name__}")
 
-                va, vua, cr = await _claude_validate(bundle, verdict)
-                verdict.claude_verdict_agrees = va
-                verdict.claude_vuln_agrees = vua
-                verdict.claude_reason = cr
-                if va is not None:
-                    log.info("Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s", orig_idx, va, vua)
-                print(f"verdict: {verdict}")
+                if claude_verification:
+                    va, vua, cr = await _claude_validate(bundle, verdict)
+                    verdict.claude_verdict_agrees = va
+                    verdict.claude_vuln_agrees = vua
+                    verdict.claude_reason = cr
+                    if va is not None:
+                        log.info("Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s", orig_idx, va, vua)
                 return {orig_idx: verdict}
 
             else:
@@ -750,7 +758,7 @@ async def analyze_all_grouped(
                 )
                 thinking = cfg.get_thinking_settings(max_severity)
                 timeout = finding_timeout + 60 * (len(group.bundles) - 1)
-                print(f"Starting group analysis for {group.group_key} ({len(group.bundles)} findings)")
+                print(f"Analysing {counter[0]}/{total} group {group.group_key} ({len(group.bundles)} findings)")
 
                 try:
                     result = await asyncio.wait_for(
@@ -776,16 +784,17 @@ async def analyze_all_grouped(
                                        reason=f"Group analysis error: {type(exc).__name__}")
                     result = {idx: uncertain for idx in group.original_indices}
 
-                for i, orig_idx in enumerate(group.original_indices):
-                    if orig_idx in result:
-                        bundle = group.bundles[i]
-                        verdict = result[orig_idx]
-                        va, vua, cr = await _claude_validate(bundle, verdict)
-                        verdict.claude_verdict_agrees = va
-                        verdict.claude_vuln_agrees = vua
-                        verdict.claude_reason = cr
-                        if va is not None:
-                            log.info("Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s", orig_idx, va, vua)
+                if claude_verification:
+                    for i, orig_idx in enumerate(group.original_indices):
+                        if orig_idx in result:
+                            bundle = group.bundles[i]
+                            verdict = result[orig_idx]
+                            va, vua, cr = await _claude_validate(bundle, verdict)
+                            verdict.claude_verdict_agrees = va
+                            verdict.claude_vuln_agrees = vua
+                            verdict.claude_reason = cr
+                            if va is not None:
+                                log.info("Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s", orig_idx, va, vua)
 
                 return result
 
