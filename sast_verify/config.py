@@ -62,6 +62,7 @@ class Config(BaseModel):
     grep_max_scan_mb: int = Field(default=5, ge=1, description="Stop grep scanning after this many MB read")
     request_limit: int = Field(default=200, ge=1, description="Max requests per agent.run() call (reasoning models need more)")
     finding_policy: FindingPolicy = Field(default_factory=FindingPolicy, description="Controls what counts as true_positive")
+    claude_verification: bool = Field(default=False, description="Enable Claude validation of verdicts (requires ANTHROPIC_API_KEY)")
     thinking_map: dict[str, ThinkingMode] | None = Field(
         default=None,
         description="Severity → thinking effort mapping (e.g. {\"ERROR\": \"full\", \"WARNING\": \"low\", \"INFO\": \"off\"}). "

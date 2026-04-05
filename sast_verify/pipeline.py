@@ -99,6 +99,7 @@ def run(
     concurrency: int = 4,
     severities: list[str] | None = ["INFO", "WARNING", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN", "NOT_AVAILABLE", "INFORMATIONAL"],
     enable_grouping: bool = True,
+    claude_verification: bool = False,
 ) -> None:
     findings = preprocess(findings_path)
     bundles = [retrieve(finding, codebase) for finding in findings]
@@ -141,6 +142,7 @@ def run(
                 analyze_all_grouped(
                     groups, codebase=codebase, concurrency=concurrency,
                     checkpoint=checkpoint, output_path=output_path,
+                    claude_verification=claude_verification,
                 )
             )
             for idx, verdict in verdict_map.items():
@@ -150,6 +152,7 @@ def run(
                 analyze_all(
                     list(analyzable), codebase=codebase, concurrency=concurrency,
                     checkpoint=checkpoint, output_path=output_path,
+                    claude_verification=claude_verification,
                 )
             )
             for idx, verdict in zip(indices, llm_verdicts):

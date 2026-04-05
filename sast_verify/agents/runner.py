@@ -767,6 +767,7 @@ async def analyze_all(
     concurrency: int = DEFAULT_CONCURRENCY,
     checkpoint: dict[int, Verdict] | None = None,
     output_path: Path | None = None,
+    claude_verification: bool = False,
 ) -> list[Verdict]:
     """Analyze findings individually (legacy path, used with --no-grouping)."""
     cfg = get_config()
@@ -783,12 +784,16 @@ async def analyze_all(
     formatter = build_verdict_formatter()
     evaluator = build_evaluator()
 
+    total = len(bundles)
     semaphore = asyncio.Semaphore(concurrency)
     completed = 0
+    started = 0
 
     async def _bounded(index: int, bundle: EvidenceBundle) -> Verdict:
-        nonlocal completed
+        nonlocal completed, started
         async with semaphore:
+            started += 1
+            print(f"Analysing {started}/{total} finding #{index}")
             thinking = cfg.get_thinking_settings(bundle.finding.severity)
             try:
                 verdict = await asyncio.wait_for(
@@ -818,17 +823,19 @@ async def analyze_all(
                 _save_checkpoint_sync(output_path, checkpoint)
                 log.info("Checkpoint saved: %d findings complete", len(checkpoint))
 
-            verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(bundle, verdict)
-            verdict.claude_verdict_agrees = verdict_agrees
-            verdict.claude_vuln_agrees = vuln_agrees
-            verdict.claude_reason = claude_reason
-            if verdict_agrees is not None:
-                log.info(
-                    "Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s | reason=%s",
-                    index, verdict_agrees, vuln_agrees, claude_reason,
-                )
-            print(f"verdict: {verdict}")
-            
+            if claude_verification:
+                print(f"  └─ Claude validating finding #{index}…")
+                verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(bundle, verdict)
+                verdict.claude_verdict_agrees = verdict_agrees
+                verdict.claude_vuln_agrees = vuln_agrees
+                verdict.claude_reason = claude_reason
+                if verdict_agrees is not None:
+                    log.info(
+                        "Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s | reason=%s",
+                        index, verdict_agrees, vuln_agrees, claude_reason,
+                    )
+                    print(f"  └─ Claude: agrees={verdict_agrees}")
+
             return verdict
 
     tasks = [_bounded(i, b) for i, b in enumerate(bundles)]
@@ -846,6 +853,7 @@ async def analyze_all_grouped(
     concurrency: int = DEFAULT_CONCURRENCY,
     checkpoint: dict[int, Verdict] | None = None,
     output_path: Path | None = None,
+    claude_verification: bool = False,
 ) -> dict[int, Verdict]:
     """Analyze finding groups, return verdicts keyed by original finding index."""
     cfg = get_config()
@@ -876,10 +884,15 @@ async def analyze_all_grouped(
 
     semaphore = asyncio.Semaphore(concurrency)
     groups_done = 0
+    findings_done = 0
+    findings_started = 0
 
     async def _bounded(gi: int, group: FindingGroup) -> dict[int, Verdict]:
-        nonlocal groups_done
+        nonlocal groups_done, findings_done, findings_started
         async with semaphore:
+            findings_started += len(group.bundles)
+            indices_str = ", ".join(f"#{i}" for i in group.original_indices)
+            print(f"Analysing {findings_started}/{total_findings} finding {indices_str}")
             # Thinking: use highest severity in group
             severities = [b.finding.severity for b in group.bundles]
             sev_order = {"ERROR": 0, "WARNING": 1, "INFO": 2}
@@ -917,24 +930,28 @@ async def analyze_all_grouped(
                 result = {idx: _uncertain(f"Group error: {type(exc).__name__}")
                           for idx in group.original_indices}
             # Claude validation for each finding in the group
-            for i, orig_idx in enumerate(group.original_indices):
-                bundle = group.bundles[i]
-                verdict = result[orig_idx]
-                verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(
-                    bundle, verdict, group=group, finding_index=i,
-                )
-                verdict.claude_verdict_agrees = verdict_agrees
-                verdict.claude_vuln_agrees = vuln_agrees
-                verdict.claude_reason = claude_reason
-                if verdict_agrees is not None:
-                    log.info(
-                        "Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s | reason=%s",
-                        orig_idx, verdict_agrees, vuln_agrees, claude_reason,
+            if claude_verification:
+                for i, orig_idx in enumerate(group.original_indices):
+                    bundle = group.bundles[i]
+                    verdict = result[orig_idx]
+                    print(f"  └─ Claude validating finding #{orig_idx}…")
+                    verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(
+                        bundle, verdict, group=group, finding_index=i,
                     )
+                    verdict.claude_verdict_agrees = verdict_agrees
+                    verdict.claude_vuln_agrees = vuln_agrees
+                    verdict.claude_reason = claude_reason
+                    if verdict_agrees is not None:
+                        log.info(
+                            "Finding %d Claude validation — verdict_agrees=%s | vuln_agrees=%s | reason=%s",
+                            orig_idx, verdict_agrees, vuln_agrees, claude_reason,
+                        )
+                        print(f"  └─ Claude: agrees={verdict_agrees}")
 
             # Save incrementally
             checkpoint.update(result)
             groups_done += 1
+            findings_done += len(group.bundles)
             if groups_done % 5 == 0:
                 _save_checkpoint_sync(output_path, checkpoint)
                 log.info("Checkpoint saved: %d findings complete (%d groups)", len(checkpoint), groups_done)
