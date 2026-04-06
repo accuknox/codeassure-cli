@@ -54,14 +54,19 @@ def main() -> None:
 
     import logging
     import os
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     if args.anthropic_key:
         os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
 
     from .config import load_config
     from .pipeline import run, verify
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except FileNotFoundError as e:
+        parser.error(str(e))
     concurrency = args.jobs if args.jobs is not None else cfg.concurrency
 
     if concurrency < 1:

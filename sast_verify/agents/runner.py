@@ -585,7 +585,7 @@ async def _claude_validate(bundle: EvidenceBundle, verdict: Verdict) -> tuple[bo
     """Call Claude to validate the verdict for a finding. Returns (verdict_agrees, vuln_agrees, reason)."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        log.warning("ANTHROPIC_API_KEY not set — skipping Claude validation")
+        log.debug("ANTHROPIC_API_KEY not set — skipping Claude validation")
         return None, None, None
 
     finding = bundle.finding
@@ -648,7 +648,7 @@ async def analyze_all(
         async with semaphore:
             counter[0] += 1
             thinking = cfg.get_thinking_settings(bundle.finding.severity)
-            print(f"Analysing {counter[0]}/{total} finding #{index}")
+            log.info("Analysing %d/%d finding #%d", counter[0], total, index)
             try:
                 verdict = await asyncio.wait_for(
                     _analyze_one(
@@ -717,7 +717,7 @@ async def analyze_all_grouped(
                 bundle = group.bundles[0]
                 orig_idx = group.original_indices[0]
                 thinking = cfg.get_thinking_settings(bundle.finding.severity)
-                print(f"Analysing {counter[0]}/{total} finding #{orig_idx}")
+                log.info("Analysing %d/%d finding #%d", counter[0], total, orig_idx)
                 try:
                     verdict = await asyncio.wait_for(
                         _analyze_one(
@@ -758,7 +758,7 @@ async def analyze_all_grouped(
                 )
                 thinking = cfg.get_thinking_settings(max_severity)
                 timeout = finding_timeout + 60 * (len(group.bundles) - 1)
-                print(f"Analysing {counter[0]}/{total} group {group.group_key} ({len(group.bundles)} findings)")
+                log.info("Analysing %d/%d group %s (%d findings)", counter[0], total, group.group_key, len(group.bundles))
 
                 try:
                     result = await asyncio.wait_for(

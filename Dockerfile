@@ -11,7 +11,7 @@ WORKDIR /app
 # Copy project files
 COPY pyproject.toml ./
 COPY sast_verify/ ./sast_verify/
-COPY codeassure.json ./
+# COPY codeassure.json ./
 
 # Install the package
 RUN uv pip install --system --no-cache .
