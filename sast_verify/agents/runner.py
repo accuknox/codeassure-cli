@@ -380,6 +380,7 @@ async def _analyze_one(
                 '{"verdict": "true_positive|false_positive|uncertain", '
                 '"is_security_vulnerability": true or false, '
                 '"confidence": "high|medium|low", '
+                '"severity": "critical|high|medium|low", '
                 '"reason": "...", "evidence_locations": ["file:line"]}\n'
                 "No markdown fences, no prose."
             )
@@ -507,6 +508,7 @@ async def _analyze_one_group(
             key_lines = "\n".join(
                 f'    "{k}": {{"verdict": "true_positive|false_positive|uncertain", '
                 f'"is_security_vulnerability": true, "confidence": "high|medium|low", '
+                f'"severity": "critical|high|medium|low", '
                 f'"reason": "...", "evidence_locations": []}}'
                 for k in expected_keys
             )

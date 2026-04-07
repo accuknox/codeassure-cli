@@ -67,6 +67,11 @@ using these exact field labels:
   privilege)? When in doubt, lean toward true. Answer false only when
   there is no plausible attack scenario.
 - **confidence**: high | medium | low
+- **severity**: critical | high | medium | low — Assessed severity of the
+  vulnerability. If verdict_candidate is true_positive, assess based on
+  exploitability and potential impact (data loss, RCE, privilege escalation =
+  critical/high; limited-scope or hard-to-reach = medium/low). If
+  false_positive or uncertain, always use "low".
 - **mitigations_found**: List any sanitizers, validators, or framework protections found (or "none")
 - **assumptions**: List any assumptions you made during analysis (or "none")
 - **unresolved_questions**: List anything you could not determine (or "none")
@@ -132,6 +137,9 @@ For each finding, use the exact format:
 - **verdict_candidate**: true_positive | false_positive | uncertain
 - **is_security_vulnerability**: true | false
 - **confidence**: high | medium | low
+- **severity**: critical | high | medium | low — Assessed severity. If
+  true_positive, assess based on exploitability and impact. If false_positive
+  or uncertain, always use "low".
 - **mitigations_found**: ...
 - **assumptions**: ...
 - **unresolved_questions**: ...
@@ -153,6 +161,7 @@ Map the analysis record fields to the verdict:
 - verdict ← verdict_candidate
 - is_security_vulnerability ← is_security_vulnerability (true/false)
 - confidence ← confidence
+- severity ← severity (assessed for true_positive; always "low" for false_positive/uncertain)
 - reason ← reasoning (condensed to one or two sentences)
 - evidence_locations ← evidence_locations
 
@@ -170,6 +179,7 @@ Respond with ONLY a JSON object (no prose, no markdown fences):
   "verdict": "true_positive | false_positive | uncertain",
   "is_security_vulnerability": true or false,
   "confidence": "high | medium | low",
+  "severity": "critical | high | medium | low",
   "reason": "one or two sentence explanation",
   "evidence_locations": ["file:line", "file:line"]
 }
@@ -187,6 +197,7 @@ For each finding, map its analysis section to a verdict entry:
 - verdict ← verdict_candidate
 - is_security_vulnerability ← is_security_vulnerability (true/false)
 - confidence ← confidence
+- severity ← severity (assessed for true_positive; always "low" for false_positive/uncertain)
 - reason ← reasoning (condensed to one or two sentences)
 - evidence_locations ← evidence_locations
 
@@ -204,9 +215,11 @@ Respond with ONLY a JSON object. "verdicts" must be an object keyed by finding n
     "0": {"verdict": "true_positive|false_positive|uncertain",
           "is_security_vulnerability": true,
           "confidence": "high|medium|low",
+          "severity": "critical|high|medium|low",
           "reason": "one or two sentence explanation",
           "evidence_locations": ["file:line"]},
     "1": {"verdict": "...", "is_security_vulnerability": true, "confidence": "...",
+          "severity": "low",
           "reason": "...", "evidence_locations": []}
   }
 }

@@ -48,6 +48,10 @@ class Verdict(BaseModel):
     confidence: Literal["high", "medium", "low"] = Field(
         description="Confidence level of the verdict",
     )
+    severity: Literal["critical", "high", "medium", "low"] = Field(
+        default="low",
+        description="Severity of the finding. Assessed severity for true_positive; always 'low' for false_positive/uncertain.",
+    )
     reason: str = Field(
         description="Plain-English explanation of the verdict, no source code",
     )

@@ -77,6 +77,7 @@ def run(
             "verdict": verdict.verdict,
             "is_security_vulnerability": verdict.is_security_vulnerability,
             "confidence": verdict.confidence,
+            "severity": verdict.severity,
             "reason": verdict.reason,
             "evidence": [{"location": loc} for loc in verdict.evidence_locations],
         }
