@@ -45,7 +45,7 @@ def run(
         ]
 
     skipped = len(bundles) - len(to_analyze)
-    print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI")
+    print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI", flush=True)
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
 
@@ -56,7 +56,7 @@ def run(
             groups = build_groups(list(analyzable), list(indices))
             co_located = sum(1 for g in groups if g.relationship == "co-located")
             print(f"Grouped {len(analyzable)} findings into {len(groups)} groups "
-                  f"({co_located} co-located, {len(groups) - co_located} solo)")
+                  f"({co_located} co-located, {len(groups) - co_located} solo)", flush=True)
             verdict_map = asyncio.run(
                 analyze_all_grouped(groups, codebase=codebase, concurrency=concurrency,
                                     claude_verification=claude_verification)
