@@ -23,7 +23,7 @@ def compact_finding(item: dict) -> Finding:
     }
 
     if cwe := metadata.get("cwe"):
-        fields["cwe"] = cwe
+        fields["cwe"] = [cwe] if isinstance(cwe, str) else cwe
 
     for key in ("confidence", "likelihood", "impact"):
         if val := metadata.get(key):

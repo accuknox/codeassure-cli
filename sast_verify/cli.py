@@ -26,6 +26,11 @@ def main() -> None:
         help="Path to codeassure.json (default: ./codeassure.json)",
     )
     parser.add_argument(
+            "--severity","-s", type=str,
+            default="INFO,WARNING,LOW,MEDIUM,HIGH,CRITICAL,UNKNOWN,NOT_AVAILABLE,INFORMATIONAL",
+            help="Comma-separated list of severities to check for AI analysis. If any match, AI analysis will run on those findings."
+        )
+    parser.add_argument(
         "--jobs", "-j", type=int, default=None, metavar="N",
         help="Max concurrent LLM requests (overrides config)",
     )
@@ -33,18 +38,47 @@ def main() -> None:
         "--verify", type=Path, default=None, metavar="FILE",
         help="Compare output against a ground-truth JSON (final_results.json) and write a CSV report",
     )
+    parser.add_argument(
+        "--anthropic-key", type=str, default=None, metavar="KEY",
+        help="Anthropic API key for Claude verdict validation (overrides ANTHROPIC_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--grouping", action="store_true", default=False,
+        help="Enable finding grouping — analyze findings in groups (default behavior)",
+    )
+    parser.add_argument(
+        "--claude-verification", action="store_true", default=False,
+        help="Enable Claude validation of verdicts (requires --anthropic-key or ANTHROPIC_API_KEY)",
+    )
     args = parser.parse_args()
+
+    import logging
+    import os
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    if args.anthropic_key:
+        os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
 
     from .config import load_config
     from .pipeline import run, verify
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except FileNotFoundError as e:
+        parser.error(str(e))
     concurrency = args.jobs if args.jobs is not None else cfg.concurrency
 
     if concurrency < 1:
         parser.error("--jobs must be at least 1")
 
-    run(args.codebase, args.findings, args.output, concurrency=concurrency)
+    run(
+        args.codebase, args.findings, args.output,
+        concurrency=concurrency,
+        severities=args.severity.split(","),
+        enable_grouping=args.grouping,
+        claude_verification=args.claude_verification,
+    )
 
     if args.verify:
         csv_path = args.output.with_suffix(".csv")

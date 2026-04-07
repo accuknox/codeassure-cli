@@ -55,3 +55,15 @@ class Verdict(BaseModel):
         default=[],
         description="file:line references that support the verdict",
     )
+    claude_verdict_agrees: bool | None = Field(
+        default=None,
+        description="Whether Claude agrees with the verdict (true_positive/false_positive/uncertain)",
+    )
+    claude_vuln_agrees: bool | None = Field(
+        default=None,
+        description="Whether Claude agrees with the is_security_vulnerability classification",
+    )
+    claude_reason: str | None = Field(
+        default=None,
+        description="Claude's reasoning for its validation of both the verdict and vulnerability classification",
+    )
