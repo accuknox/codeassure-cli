@@ -1,20 +1,15 @@
 FROM python:3.12-slim
 
-# Install uv
-RUN pip install --no-cache-dir uv
+# Install uv and git
+RUN pip install --no-cache-dir uv && apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd -m -u 1000 codeassureuser
 
 WORKDIR /app
 
-# Copy project files
-COPY pyproject.toml ./
-COPY sast_verify/ ./sast_verify/
-# COPY codeassure.json ./
-
-# Install the package
-RUN uv pip install --system --no-cache .
+# Install codeassure
+RUN uv pip install --system --no-cache git+https://github.com/accuknox/codeassure-cli.git@v0.1.0
 
 # Set ownership
 RUN chown -R codeassureuser:codeassureuser /app
