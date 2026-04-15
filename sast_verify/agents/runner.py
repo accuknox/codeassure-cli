@@ -35,6 +35,25 @@ MAX_GREP_BYTES_DEFAULT = 5 * 1024 * 1024
 
 import re
 
+from pydantic_ai.exceptions import UnexpectedModelBehavior
+
+
+async def _run_with_retry(agent, message, *, retries: int = 3, base_delay: float = 2.0, **kwargs):
+    """Run an agent call, retrying on transient UnexpectedModelBehavior (e.g. null API response)."""
+    for attempt in range(retries):
+        try:
+            return await agent.run(message, **kwargs)
+        except UnexpectedModelBehavior as exc:
+            if attempt < retries - 1:
+                delay = base_delay * (2 ** attempt)
+                log.warning(
+                    "Transient model error (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1, retries, delay, type(exc).__name__,
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+
 
 def _fix_unquoted_strings(text: str) -> str:
     """Fix JSON with unquoted string values — common with some models.
@@ -330,7 +349,7 @@ async def _analyze_one(
     # Stage 1: Tool-using analysis
     try:
         analysis_result = await asyncio.wait_for(
-            analyzer.run(build_user_message(bundle), **run_kwargs),
+            _run_with_retry(analyzer, build_user_message(bundle), **run_kwargs),
             timeout=stage_timeout,
         )
         analysis = analysis_result.output
@@ -339,7 +358,7 @@ async def _analyze_one(
         return Verdict(verdict="uncertain", confidence="low",
                        reason=f"Analyzer stage timed out after {stage_timeout}s.")
     except Exception as exc:
-        log.error("Analyzer failed for finding %d: %s", index, exc)
+        log.error("Analyzer failed for finding %d: %s", index, type(exc).__name__)
         return Verdict(verdict="uncertain", confidence="low",
                        reason=f"Analyzer error: {type(exc).__name__}")
 
@@ -356,7 +375,7 @@ async def _analyze_one(
 
     try:
         format_result = await asyncio.wait_for(
-            formatter.run(format_message, **formatter_kwargs),
+            _run_with_retry(formatter, format_message, **formatter_kwargs),
             timeout=stage_timeout,
         )
         response = format_result.output
@@ -364,7 +383,7 @@ async def _analyze_one(
         log.warning("Formatter timed out for finding %d", index)
         response = ""
     except Exception as exc:
-        log.error("Formatter failed for finding %d: %s", index, exc)
+        log.error("Formatter failed for finding %d: %s", index, type(exc).__name__)
         response = ""
 
     verdict = None
@@ -386,7 +405,8 @@ async def _analyze_one(
             )
             try:
                 repair_result = await asyncio.wait_for(
-                    formatter.run(
+                    _run_with_retry(
+                        formatter,
                         repair_message,
                         message_history=format_result.all_messages(),
                         **formatter_kwargs,
@@ -464,7 +484,7 @@ async def _analyze_one_group(
     # Stage 1: Tool-using analysis
     try:
         analysis_result = await asyncio.wait_for(
-            analyzer.run(build_group_message(group), **run_kwargs),
+            _run_with_retry(analyzer, build_group_message(group), **run_kwargs),
             timeout=stage_timeout,
         )
         analysis = analysis_result.output
@@ -472,7 +492,7 @@ async def _analyze_one_group(
         log.warning("Group analyzer timed out for %s", group.group_key)
         return _uncertain_all(f"Analyzer stage timed out after {stage_timeout}s.")
     except Exception as exc:
-        log.error("Group analyzer failed for %s: %s", group.group_key, exc)
+        log.error("Group analyzer failed for %s: %s", group.group_key, type(exc).__name__)
         return _uncertain_all(f"Analyzer error: {type(exc).__name__}")
 
     if not analysis.strip():
@@ -487,7 +507,7 @@ async def _analyze_one_group(
 
     try:
         format_result = await asyncio.wait_for(
-            formatter.run(format_message, **formatter_kwargs),
+            _run_with_retry(formatter, format_message, **formatter_kwargs),
             timeout=stage_timeout,
         )
         response = format_result.output
@@ -495,7 +515,7 @@ async def _analyze_one_group(
         log.warning("Group formatter timed out for %s", group.group_key)
         response = ""
     except Exception as exc:
-        log.error("Group formatter failed for %s: %s", group.group_key, exc)
+        log.error("Group formatter failed for %s: %s", group.group_key, type(exc).__name__)
         response = ""
 
     verdicts: dict[str, Verdict] | None = None
