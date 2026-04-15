@@ -358,7 +358,7 @@ async def _analyze_one(
         return Verdict(verdict="uncertain", confidence="low",
                        reason=f"Analyzer stage timed out after {stage_timeout}s.")
     except Exception as exc:
-        log.error("Analyzer failed for finding %d: %s", index, type(exc).__name__)
+        log.error("Analyzer failed for finding %d: %s", index, exc)
         return Verdict(verdict="uncertain", confidence="low",
                        reason=f"Analyzer error: {type(exc).__name__}")
 
