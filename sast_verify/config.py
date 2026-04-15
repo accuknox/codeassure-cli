@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field
 
 
 _OPENAI_COMPATIBLE_PROVIDERS = frozenset({"openai", "openai-compatible"})
+_ANTHROPIC_PROVIDERS = frozenset({"anthropic"})
+_GOOGLE_PROVIDERS = frozenset({"google", "gemini"})
+_ALL_SUPPORTED_PROVIDERS = _OPENAI_COMPATIBLE_PROVIDERS | _ANTHROPIC_PROVIDERS | _GOOGLE_PROVIDERS
 
 ThinkingMode = Literal["full", "low", "off"]
 
@@ -32,9 +35,11 @@ def thinking_model_settings(mode: ThinkingMode) -> dict[str, Any]:
 
 
 class ModelConfig(BaseModel):
-    provider: str = Field(description="Provider type — must be 'openai' (or 'openai-compatible') for now")
+    provider: str = Field(description="Provider: 'openai', 'openai-compatible', 'anthropic', 'google', or 'gemini'")
     name: str = Field(description="Model name as known by the provider")
     api_base: str | None = Field(default=None, description="API base URL (for self-hosted endpoints)")
+    api_key: str | None = Field(default=None, description="API key (overrides env vars; supports $VAR_NAME syntax for env var references)")
+    tool_calling: bool = Field(default=True, description="Set to false for models that don't support tool/function calling")
 
 
 class Config(BaseModel):
@@ -63,23 +68,59 @@ class Config(BaseModel):
     def litellm_model(self) -> str:
         return f"{self.model.provider}/{self.model.name}"
 
-    def build_model(self):
-        from pydantic_ai.models.openai import OpenAIChatModel
-        from pydantic_ai.providers.openai import OpenAIProvider
+    def _resolve_api_key(self) -> str | None:
+        """Resolve API key from config.
 
-        if self.model.provider not in _OPENAI_COMPATIBLE_PROVIDERS:
+        - Literal value: ``"api_key": "sk-abc123"``
+        - Env var reference: ``"api_key": "$OPENROUTER_API_KEY"``
+        """
+        raw = self.model.api_key
+        if raw is None:
+            return None
+        if raw.startswith("$"):
+            return os.environ.get(raw[1:])
+        return raw
+    
+    def build_model(self):
+        if self.model.provider not in _ALL_SUPPORTED_PROVIDERS:
             raise ValueError(
                 f"Unsupported provider {self.model.provider!r}. "
-                f"Only {sorted(_OPENAI_COMPATIBLE_PROVIDERS)} are supported. "
-                f"PydanticAI uses OpenAIProvider for OpenAI-compatible endpoints."
+                f"Supported: {sorted(_ALL_SUPPORTED_PROVIDERS)}"
             )
-        kwargs: dict = {}
+
+        api_key = self._resolve_api_key()
+
+        if self.model.provider in _OPENAI_COMPATIBLE_PROVIDERS:
+            from pydantic_ai.models.openai import OpenAIChatModel
+            from pydantic_ai.providers.openai import OpenAIProvider
+            kwargs: dict = {}
+            if self.model.api_base:
+                base = self.model.api_base.rstrip("/")
+                kwargs["base_url"] = base if base.endswith("/v1") else f"{base}/v1"
+            if api_key is not None:
+                kwargs["api_key"] = api_key
+            return OpenAIChatModel(self.model.name, provider=OpenAIProvider(**kwargs))
+
+        if self.model.provider in _ANTHROPIC_PROVIDERS:
+            from pydantic_ai.models.anthropic import AnthropicModel
+            from pydantic_ai.providers.anthropic import AnthropicProvider
+            kwargs = {}
+            if self.model.api_base:
+                base = self.model.api_base.rstrip("/")
+                kwargs["base_url"] = base[:-3] if base.endswith("/v1") else base
+            if api_key is not None:
+                kwargs["api_key"] = api_key
+            return AnthropicModel(self.model.name, provider=AnthropicProvider(**kwargs))
+
+        # google / gemini
+        from pydantic_ai.models.google import GoogleModel
+        from pydantic_ai.providers.google import GoogleProvider
+        kwargs = {}
         if self.model.api_base:
             kwargs["base_url"] = self.model.api_base
-        return OpenAIChatModel(
-            self.model.name,
-            provider=OpenAIProvider(**kwargs),
-        )
+        if api_key is not None:
+            kwargs["api_key"] = api_key
+        return GoogleModel(self.model.name, provider=GoogleProvider(**kwargs))
 
     def apply(self) -> None:
         """Set LiteLLM env vars from config. API keys come from .env / environment."""

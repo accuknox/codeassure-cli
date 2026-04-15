@@ -1,8 +1,11 @@
 {
   "model": {
     "provider": "openai",
-    "name": "qwen35-nvfp4",
-    "api_base": "http://localhost:5000/v1"
+    "name": "qwen/qwen3.5-9b",
+    "api_base": "https://openrouter.ai/api",
+    "api_key": "$OPENROUTER_KEY"
   },
-  "concurrency": 4
+  "concurrency": 2,
+  "stage_timeout": 300,
+  "finding_timeout": 600
 }
