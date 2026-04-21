@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .agents.runner import analyze_all, analyze_all_grouped
@@ -33,8 +35,15 @@ def run(
     enable_grouping: bool = True,
     claude_verification: bool = False,
 ) -> None:
+    wall_start = time.perf_counter()
+
     findings = preprocess(findings_path)
-    bundles = [retrieve(finding, codebase) for finding in findings]
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=min(len(findings), concurrency * 2) if findings else 1) as pool:
+        bundles = list(pool.map(lambda f: retrieve(f, codebase), findings))
+    retrieval_elapsed = time.perf_counter() - t0
+    print(f"[timing] retrieval: {retrieval_elapsed:.1f}s for {len(findings)} finding(s)", flush=True)
+
     # Only anchored findings go to the agent; unanchored → deterministic uncertain
     verdicts: list[Verdict] = [_no_anchor_verdict()] * len(bundles)
     to_analyze = [(i, b) for i, b in enumerate(bundles) if b.evidence]
@@ -49,8 +58,10 @@ def run(
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
 
+    ai_elapsed = 0.0
     if to_analyze:
         indices, analyzable = zip(*to_analyze)
+        t1 = time.perf_counter()
 
         if enable_grouping:
             groups = build_groups(list(analyzable), list(indices))
@@ -71,6 +82,15 @@ def run(
             for idx, verdict in zip(indices, llm_verdicts):
                 verdicts[idx] = verdict
 
+        ai_elapsed = time.perf_counter() - t1
+        n = len(to_analyze)
+        print(
+            f"[timing] AI analysis: {ai_elapsed:.1f}s total | "
+            f"{ai_elapsed / n:.1f}s avg per finding | "
+            f"{n} finding(s) | concurrency={concurrency}",
+            flush=True,
+        )
+
     raw = json.loads(findings_path.read_text(encoding="utf-8"))
     for result, verdict in zip(raw["results"], verdicts):
         verification: dict = {
@@ -90,6 +110,12 @@ def run(
             }
 
     output_path.write_text(json.dumps(raw, indent=2))
+    total_elapsed = time.perf_counter() - wall_start
+    print(
+        f"[timing] done — total wall time: {total_elapsed:.1f}s "
+        f"(retrieval {retrieval_elapsed:.1f}s + AI {ai_elapsed:.1f}s + output {total_elapsed - retrieval_elapsed - ai_elapsed:.1f}s)",
+        flush=True,
+    )
 
 
 def verify(

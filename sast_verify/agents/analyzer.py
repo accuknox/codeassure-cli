@@ -38,6 +38,13 @@ def build_verdict_formatter() -> Agent[None, str]:
     )
 
 
+def build_group_verdict_formatter() -> Agent[None, str]:
+    return Agent(
+        get_config().build_model(),
+        instructions=GROUP_VERDICT_FORMATTER_INSTRUCTION,
+    )
+
+
 def build_group_analyzer() -> Agent[AnalyzerDeps, str]:
     cfg = get_config()
     if cfg.model.tool_calling:
@@ -51,11 +58,4 @@ def build_group_analyzer() -> Agent[AnalyzerDeps, str]:
         cfg.build_model(),
         deps_type=AnalyzerDeps,
         instructions=GROUP_ANALYZER_INSTRUCTION_NO_TOOLS,
-    )
-
-
-def build_group_verdict_formatter() -> Agent[None, str]:
-    return Agent(
-        get_config().build_model(),
-        instructions=GROUP_VERDICT_FORMATTER_INSTRUCTION,
     )

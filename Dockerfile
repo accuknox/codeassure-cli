@@ -9,7 +9,7 @@ RUN useradd -m -u 1000 codeassureuser
 WORKDIR /app
 
 # Install codeassure
-RUN uv pip install --system --no-cache git+https://github.com/accuknox/codeassure-cli.git@v0.1.0
+RUN uv pip install --system --no-cache git+https://github.com/accuknox/codeassure-cli.git@v0.1.1
 
 # Set ownership
 RUN chown -R codeassureuser:codeassureuser /app
