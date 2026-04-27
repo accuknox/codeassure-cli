@@ -40,16 +40,18 @@ class ModelConfig(BaseModel):
     api_base: str | None = Field(default=None, description="API base URL (for self-hosted endpoints)")
     api_key: str | None = Field(default=None, description="API key (overrides env vars; supports $VAR_NAME syntax for env var references)")
     tool_calling: bool = Field(default=True, description="Set to false for models that don't support tool/function calling")
+    temperature: float | None = Field(default=0.1, description="Sampling temperature (0.0 = deterministic). Set null to use model default.")
 
 
 class Config(BaseModel):
     model: ModelConfig
-    concurrency: int = Field(default=4, ge=1)
+    concurrency: int = Field(default=7, ge=1)
     stage_timeout: int = Field(default=120, ge=10, description="Seconds per LLM stage (analyzer or formatter)")
     finding_timeout: int = Field(default=300, ge=30, description="Seconds for the entire finding (both stages + repair)")
     grep_max_file_kb: int = Field(default=512, ge=1, description="Skip files larger than this in grep (KB)")
     grep_max_scan_mb: int = Field(default=5, ge=1, description="Stop grep scanning after this many MB read")
     request_limit: int = Field(default=200, ge=1, description="Max requests per agent.run() call (reasoning models need more)")
+    voting_rounds: int = Field(default=1, ge=1, description="Run each finding N times and take majority verdict (3 recommended for non-deterministic local models)")
     thinking_map: dict[str, ThinkingMode] | None = Field(
         # default_factory=lambda: dict(_DEFAULT_THINKING_MAP),
         default=None,
@@ -57,12 +59,20 @@ class Config(BaseModel):
         "Set to null/omit to disable (no extra_body sent).",
     )
 
+    def base_model_settings(self) -> dict[str, Any] | None:
+        """Return base model_settings with temperature, or None if nothing to set."""
+        if self.model.temperature is None:
+            return None
+        return {"temperature": self.model.temperature}
+
     def get_thinking_settings(self, severity: str) -> dict[str, Any] | None:
         """Return model_settings dict for the given severity, or None if thinking control is disabled."""
+        base = self.base_model_settings() or {}
         if self.thinking_map is None:
-            return None
+            return base or None
         mode = self.thinking_map.get(severity.upper(), "low")  # default to low for unknown severities
-        return thinking_model_settings(mode)
+        thinking = thinking_model_settings(mode)
+        return {**base, **thinking}
 
     @property
     def litellm_model(self) -> str:

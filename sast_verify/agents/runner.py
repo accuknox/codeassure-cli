@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import anthropic
@@ -28,7 +29,7 @@ from .deps import AnalyzerDeps
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONCURRENCY = 4
+DEFAULT_CONCURRENCY = 7
 MAX_GREP_FILE_SIZE_DEFAULT = 512 * 1024
 MAX_GREP_BYTES_DEFAULT = 5 * 1024 * 1024
 
@@ -274,6 +275,34 @@ def _validate_group_evidence(
 
 
 # ---------------------------------------------------------------------------
+# Majority voting
+# ---------------------------------------------------------------------------
+
+_CONFIDENCE_WEIGHT = {"high": 3, "medium": 2, "low": 1}
+
+
+def _majority_verdict(verdicts: list[Verdict]) -> Verdict:
+    """Pick verdict with the most votes; break ties by total confidence weight."""
+    from collections import Counter
+    counts: Counter = Counter(v.verdict for v in verdicts)
+    max_votes = max(counts.values())
+    candidates = [label for label, n in counts.items() if n == max_votes]
+
+    if len(candidates) == 1:
+        winner = candidates[0]
+    else:
+        weights: dict[str, int] = {}
+        for v in verdicts:
+            weights[v.verdict] = weights.get(v.verdict, 0) + _CONFIDENCE_WEIGHT.get(v.confidence, 1)
+        winner = max(candidates, key=lambda lbl: weights.get(lbl, 0))
+
+    winners = [v for v in verdicts if v.verdict == winner]
+    best = max(winners, key=lambda v: _CONFIDENCE_WEIGHT.get(v.confidence, 0))
+    best.voting_tally = dict(counts)
+    return best
+
+
+# ---------------------------------------------------------------------------
 # Shared primitives
 # ---------------------------------------------------------------------------
 
@@ -318,9 +347,8 @@ def _severity_rank(s: str) -> int:
 # Single-finding analysis
 # ---------------------------------------------------------------------------
 
-async def _analyze_one(
+async def _analyze_one_round(
     analyzer,
-    formatter,
     bundle: EvidenceBundle,
     codebase: Path,
     index: int,
@@ -329,7 +357,9 @@ async def _analyze_one(
     grep_max_bytes: int = MAX_GREP_BYTES_DEFAULT,
     request_limit: int = 200,
     thinking_settings: dict | None = None,
+    formatter=None,
 ) -> Verdict:
+    """Single analysis pass for one finding. Returns a Verdict (possibly uncertain on failure)."""
     finding_dir = Path(bundle.finding.path).parent
     anchor_root = _compute_anchor_root(finding_dir)
     deps = _build_deps(codebase, finding_dir, anchor_root, grep_max_file_size, grep_max_bytes)
@@ -338,21 +368,13 @@ async def _analyze_one(
     run_kwargs: dict = {"deps": deps, "usage_limits": limits}
     if thinking_settings:
         run_kwargs["model_settings"] = thinking_settings
-        formatter_kwargs: dict = {"model_settings": thinking_settings}
-        mode = "full" if not thinking_settings["extra_body"]["chat_template_kwargs"].get("low_effort") else "low"
-        if not thinking_settings["extra_body"]["chat_template_kwargs"]["enable_thinking"]:
-            mode = "off"
-        log.info("Finding %d [%s] → thinking=%s", index, bundle.finding.severity, mode)
-    else:
-        formatter_kwargs = {}
 
-    # Stage 1: Tool-using analysis
     try:
-        analysis_result = await asyncio.wait_for(
+        result = await asyncio.wait_for(
             _run_with_retry(analyzer, build_user_message(bundle), **run_kwargs),
             timeout=stage_timeout,
         )
-        analysis = analysis_result.output
+        analysis = result.output
     except asyncio.TimeoutError:
         log.warning("Analyzer timed out for finding %d", index)
         return Verdict(verdict="uncertain", confidence="low",
@@ -369,68 +391,22 @@ async def _analyze_one(
 
     accessed_paths = deps.accessed_paths
 
-    # Stage 2: Verdict extraction with validation-error repair loop
-    format_message = build_formatter_message(analysis, bundle)
-    format_result = None
-
-    try:
-        format_result = await asyncio.wait_for(
-            _run_with_retry(formatter, format_message, **formatter_kwargs),
-            timeout=stage_timeout,
-        )
-        response = format_result.output
-    except asyncio.TimeoutError:
-        log.warning("Formatter timed out for finding %d", index)
-        response = ""
-    except Exception as exc:
-        log.error("Formatter failed for finding %d: %s", index, type(exc).__name__)
-        response = ""
-
     verdict = None
-    if response.strip():
-        try:
-            verdict = _parse_verdict(response)
-        except Exception as exc:
-            log.warning("Formatter parse failed for finding %d: %s", index, exc)
-
-            repair_message = (
-                f"Your response could not be parsed: {exc}\n\n"
-                "Return ONLY a valid JSON object with these exact keys:\n"
-                '{"verdict": "true_positive|false_positive|uncertain", '
-                '"is_security_vulnerability": true or false, '
-                '"confidence": "high|medium|low", '
-                '"severity": "critical|high|medium|low", '
-                '"reason": "...", "evidence_locations": ["file:line"]}\n'
-                "No markdown fences, no prose."
-            )
+    try:
+        verdict = _parse_verdict(analysis)
+    except Exception as exc:
+        log.warning("Direct parse failed for finding %d: %s — trying formatter fallback", index, exc)
+        if formatter is not None:
             try:
-                repair_result = await asyncio.wait_for(
-                    _run_with_retry(
-                        formatter,
-                        repair_message,
-                        message_history=format_result.all_messages(),
-                        **formatter_kwargs,
-                    ),
+                fmt_result = await asyncio.wait_for(
+                    _run_with_retry(formatter, build_formatter_message(analysis, bundle)),
                     timeout=stage_timeout,
                 )
-                repair_response = repair_result.output
-            except Exception:
-                repair_response = ""
-
-            if repair_response.strip():
-                try:
-                    verdict = _parse_verdict(repair_response)
-                except Exception as repair_exc:
-                    log.warning("Formatter repair failed for finding %d: %s", index, repair_exc)
+                verdict = _parse_verdict(fmt_result.output)
+            except Exception as fmt_exc:
+                log.error("Formatter fallback also failed for finding %d: %s", index, fmt_exc)
 
     if verdict is None:
-        try:
-            verdict = _parse_verdict(analysis)
-        except Exception:
-            pass
-
-    if verdict is None:
-        log.error("All parse attempts failed for finding %d", index)
         return Verdict(verdict="uncertain", confidence="low",
                        reason="Could not extract a valid verdict from LLM output.")
 
@@ -446,13 +422,57 @@ async def _analyze_one(
     return verdict
 
 
+async def _analyze_one(
+    analyzer,
+    bundle: EvidenceBundle,
+    codebase: Path,
+    index: int,
+    stage_timeout: float = 500,
+    grep_max_file_size: int = MAX_GREP_FILE_SIZE_DEFAULT,
+    grep_max_bytes: int = MAX_GREP_BYTES_DEFAULT,
+    request_limit: int = 200,
+    thinking_settings: dict | None = None,
+    formatter=None,
+    voting_rounds: int = 1,
+) -> Verdict:
+    if voting_rounds <= 1:
+        return await _analyze_one_round(
+            analyzer, bundle, codebase, index,
+            stage_timeout=stage_timeout,
+            grep_max_file_size=grep_max_file_size,
+            grep_max_bytes=grep_max_bytes,
+            request_limit=request_limit,
+            thinking_settings=thinking_settings,
+            formatter=formatter,
+        )
+
+    round_kwargs = dict(
+        stage_timeout=stage_timeout,
+        grep_max_file_size=grep_max_file_size,
+        grep_max_bytes=grep_max_bytes,
+        request_limit=request_limit,
+        thinking_settings=thinking_settings,
+        formatter=formatter,
+    )
+    tasks = [
+        _analyze_one_round(analyzer, bundle, codebase, index, **round_kwargs)
+        for _ in range(voting_rounds)
+    ]
+    results = await asyncio.gather(*tasks)
+    verdict = _majority_verdict(list(results))
+    log.info(
+        "Finding %d voting (%d rounds): %s → %s",
+        index, voting_rounds, verdict.voting_tally, verdict.verdict,
+    )
+    return verdict
+
+
 # ---------------------------------------------------------------------------
 # Group analysis
 # ---------------------------------------------------------------------------
 
 async def _analyze_one_group(
     analyzer,
-    formatter,
     group: FindingGroup,
     codebase: Path,
     stage_timeout: float = 500,
@@ -460,6 +480,7 @@ async def _analyze_one_group(
     grep_max_bytes: int = MAX_GREP_BYTES_DEFAULT,
     request_limit: int = 200,
     thinking_settings: dict | None = None,
+    formatter=None,
 ) -> dict[int, Verdict]:
     """Analyze a co-located group. Returns dict[original_index → Verdict]."""
     finding_dir = Path(group.bundles[0].finding.path).parent
@@ -468,10 +489,8 @@ async def _analyze_one_group(
 
     limits = UsageLimits(request_limit=request_limit)
     run_kwargs: dict = {"deps": deps, "usage_limits": limits}
-    formatter_kwargs: dict = {}
     if thinking_settings:
         run_kwargs["model_settings"] = thinking_settings
-        formatter_kwargs["model_settings"] = thinking_settings
 
     expected_keys = [str(i) for i in range(len(group.bundles))]
 
@@ -479,15 +498,12 @@ async def _analyze_one_group(
         return {idx: Verdict(verdict="uncertain", confidence="low", reason=reason)
                 for idx in group.original_indices}
 
-    log.info("Group %s (%d findings, %s)", group.group_key, len(group.bundles), group.relationship)
-
-    # Stage 1: Tool-using analysis
     try:
-        analysis_result = await asyncio.wait_for(
+        result = await asyncio.wait_for(
             _run_with_retry(analyzer, build_group_message(group), **run_kwargs),
             timeout=stage_timeout,
         )
-        analysis = analysis_result.output
+        analysis = result.output
     except asyncio.TimeoutError:
         log.warning("Group analyzer timed out for %s", group.group_key)
         return _uncertain_all(f"Analyzer stage timed out after {stage_timeout}s.")
@@ -501,72 +517,22 @@ async def _analyze_one_group(
 
     accessed_paths = deps.accessed_paths
 
-    # Stage 2: Group verdict formatting
-    format_message = build_group_formatter_message(analysis, group)
-    format_result = None
-
+    verdicts = None
     try:
-        format_result = await asyncio.wait_for(
-            _run_with_retry(formatter, format_message, **formatter_kwargs),
-            timeout=stage_timeout,
-        )
-        response = format_result.output
-    except asyncio.TimeoutError:
-        log.warning("Group formatter timed out for %s", group.group_key)
-        response = ""
+        verdicts = _parse_group_verdicts(analysis, expected_keys)
     except Exception as exc:
-        log.error("Group formatter failed for %s: %s", group.group_key, type(exc).__name__)
-        response = ""
-
-    verdicts: dict[str, Verdict] | None = None
-    if response.strip():
-        try:
-            verdicts = _parse_group_verdicts(response, expected_keys)
-        except Exception as exc:
-            log.warning("Group verdict parse failed for %s: %s", group.group_key, exc)
-
-            key_lines = "\n".join(
-                f'    "{k}": {{"verdict": "true_positive|false_positive|uncertain", '
-                f'"is_security_vulnerability": true, "confidence": "high|medium|low", '
-                f'"severity": "critical|high|medium|low", '
-                f'"reason": "...", "evidence_locations": []}}'
-                for k in expected_keys
-            )
-            repair_msg = (
-                f"Your response could not be parsed: {exc}\n\n"
-                "Return ONLY a JSON object:\n"
-                '{\n  "verdicts": {\n'
-                + key_lines
-                + "\n  }\n}\nNo markdown fences, no prose."
-            )
+        log.warning("Direct group parse failed for %s: %s — trying formatter fallback", group.group_key, exc)
+        if formatter is not None:
             try:
-                history = format_result.all_messages() if format_result is not None else None
-                repair_kw = dict(formatter_kwargs)
-                if history:
-                    repair_kw["message_history"] = history
-                repair_result = await asyncio.wait_for(
-                    formatter.run(repair_msg, **repair_kw),
+                fmt_result = await asyncio.wait_for(
+                    _run_with_retry(formatter, build_group_formatter_message(analysis, group)),
                     timeout=stage_timeout,
                 )
-                repair_response = repair_result.output
-            except Exception:
-                repair_response = ""
-
-            if repair_response.strip():
-                try:
-                    verdicts = _parse_group_verdicts(repair_response, expected_keys)
-                except Exception as repair_exc:
-                    log.warning("Group verdict repair failed for %s: %s", group.group_key, repair_exc)
-
-    # Fallback: try parsing analyzer output directly
-    if verdicts is None:
-        try:
-            verdicts = _parse_group_verdicts(analysis, expected_keys)
-        except Exception:
-            pass
+                verdicts = _parse_group_verdicts(fmt_result.output, expected_keys)
+            except Exception as fmt_exc:
+                log.error("Formatter fallback also failed for group %s: %s", group.group_key, fmt_exc)
 
     if verdicts is None:
-        log.error("All group parse attempts failed for %s", group.group_key)
         return _uncertain_all("Could not extract group verdicts from LLM output.")
 
     verdicts = _validate_group_evidence(group, verdicts, accessed_paths)
@@ -658,31 +624,33 @@ async def analyze_all(
     grep_max_file_size = cfg.grep_max_file_kb * 1024
     grep_max_bytes = cfg.grep_max_scan_mb * 1024 * 1024
     request_limit = cfg.request_limit
+    voting_rounds = cfg.voting_rounds
 
     analyzer = build_analyzer()
     formatter = build_verdict_formatter()
 
     semaphore = asyncio.Semaphore(concurrency)
     total = len(bundles)
-    counter = [0]
+    done_counter = [0]
 
     async def _bounded(index: int, bundle: EvidenceBundle) -> Verdict:
         async with semaphore:
-            counter[0] += 1
             thinking = cfg.get_thinking_settings(bundle.finding.severity)
-            log.info("Analysing %d/%d finding #%d", counter[0], total, index)
+            t0 = time.perf_counter()
             try:
                 verdict = await asyncio.wait_for(
                     _analyze_one(
-                        analyzer, formatter,
+                        analyzer,
                         bundle, codebase, index,
                         stage_timeout=stage_timeout,
                         grep_max_file_size=grep_max_file_size,
                         grep_max_bytes=grep_max_bytes,
                         request_limit=request_limit,
                         thinking_settings=thinking,
+                        formatter=formatter,
+                        voting_rounds=voting_rounds,
                     ),
-                    timeout=finding_timeout,
+                    timeout=finding_timeout * voting_rounds,
                 )
             except asyncio.TimeoutError:
                 log.error("Finding %d timed out after %ds", index, finding_timeout)
@@ -692,6 +660,14 @@ async def analyze_all(
                 log.error("Finding %d failed: %s", index, exc)
                 return Verdict(verdict="uncertain", confidence="low",
                                reason=f"Analysis error: {type(exc).__name__}")
+
+            done_counter[0] += 1
+            elapsed = time.perf_counter() - t0
+            tally_str = f" votes={verdict.voting_tally}" if verdict.voting_tally else ""
+            print(
+                f"[{done_counter[0]}/{total}] Finding #{index} — {elapsed:.1f}s",
+                flush=True,
+            )
 
             if claude_verification:
                 verdict_agrees, vuln_agrees, claude_reason = await _claude_validate(bundle, verdict)
@@ -722,6 +698,7 @@ async def analyze_all_grouped(
     grep_max_file_size = cfg.grep_max_file_kb * 1024
     grep_max_bytes = cfg.grep_max_scan_mb * 1024 * 1024
     request_limit = cfg.request_limit
+    voting_rounds = cfg.voting_rounds
 
     solo_analyzer = build_analyzer()
     solo_formatter = build_verdict_formatter()
@@ -730,28 +707,29 @@ async def analyze_all_grouped(
 
     semaphore = asyncio.Semaphore(concurrency)
     total = len(groups)
-    counter = [0]
+    done_counter = [0]
 
     async def _bounded_group(group: FindingGroup) -> dict[int, Verdict]:
         async with semaphore:
-            counter[0] += 1
             if group.relationship == "solo":
                 bundle = group.bundles[0]
                 orig_idx = group.original_indices[0]
                 thinking = cfg.get_thinking_settings(bundle.finding.severity)
-                log.info("Analysing %d/%d finding #%d", counter[0], total, orig_idx)
+                t0 = time.perf_counter()
                 try:
                     verdict = await asyncio.wait_for(
                         _analyze_one(
-                            solo_analyzer, solo_formatter,
+                            solo_analyzer,
                             bundle, codebase, orig_idx,
                             stage_timeout=stage_timeout,
                             grep_max_file_size=grep_max_file_size,
                             grep_max_bytes=grep_max_bytes,
                             request_limit=request_limit,
                             thinking_settings=thinking,
+                            formatter=solo_formatter,
+                            voting_rounds=voting_rounds,
                         ),
-                        timeout=finding_timeout,
+                        timeout=finding_timeout * voting_rounds,
                     )
                 except asyncio.TimeoutError:
                     log.error("Finding %d timed out after %ds", orig_idx, finding_timeout)
@@ -761,6 +739,13 @@ async def analyze_all_grouped(
                     log.error("Finding %d failed: %s", orig_idx, exc)
                     verdict = Verdict(verdict="uncertain", confidence="low",
                                      reason=f"Analysis error: {type(exc).__name__}")
+
+                done_counter[0] += 1
+                tally_str = f" votes={verdict.voting_tally}" if verdict.voting_tally else ""
+                print(
+                    f"[{done_counter[0]}/{total}] Finding #{orig_idx} — {time.perf_counter() - t0:.1f}s",
+                    flush=True,
+                )
 
                 if claude_verification:
                     va, vua, cr = await _claude_validate(bundle, verdict)
@@ -780,17 +765,18 @@ async def analyze_all_grouped(
                 )
                 thinking = cfg.get_thinking_settings(max_severity)
                 timeout = finding_timeout + 60 * (len(group.bundles) - 1)
-                log.info("Analysing %d/%d group %s (%d findings)", counter[0], total, group.group_key, len(group.bundles))
+                t0 = time.perf_counter()
 
                 try:
                     result = await asyncio.wait_for(
                         _analyze_one_group(
-                            group_analyzer, group_formatter,
+                            group_analyzer,
                             group, codebase,
                             stage_timeout=stage_timeout,
                             grep_max_file_size=grep_max_file_size,
                             grep_max_bytes=grep_max_bytes,
                             request_limit=request_limit,
+                            formatter=group_formatter,
                             thinking_settings=thinking,
                         ),
                         timeout=timeout,
@@ -805,6 +791,15 @@ async def analyze_all_grouped(
                     uncertain = Verdict(verdict="uncertain", confidence="low",
                                        reason=f"Group analysis error: {type(exc).__name__}")
                     result = {idx: uncertain for idx in group.original_indices}
+
+                done_counter[0] += 1
+                elapsed = time.perf_counter() - t0
+                indices_str = ", ".join(f"#{i}" for i in group.original_indices)
+                print(
+                    f"[{done_counter[0]}/{total}] Group [{indices_str}] — "
+                    f"{len(group.bundles)} findings — {elapsed:.1f}s",
+                    flush=True,
+                )
 
                 if claude_verification:
                     for i, orig_idx in enumerate(group.original_indices):

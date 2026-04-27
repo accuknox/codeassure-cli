@@ -40,9 +40,9 @@ def build_user_message(bundle: EvidenceBundle) -> str:
     return "\n".join(parts)
 
 
+
 def build_formatter_message(analysis: str, bundle: EvidenceBundle) -> str:
     f = bundle.finding
-
     parts = [
         "## Analysis Record",
         analysis,
@@ -53,7 +53,19 @@ def build_formatter_message(analysis: str, bundle: EvidenceBundle) -> str:
         f"- **severity**: {f.severity}",
         f"- **claim**: {f.message}",
     ]
+    return "\n".join(parts)
 
+
+def build_group_formatter_message(analysis: str, group: "FindingGroup") -> str:
+    parts = ["## Analysis Record", analysis, "\n## Original Findings (cross-reference)"]
+    for i, bundle in enumerate(group.bundles):
+        f = bundle.finding
+        parts.append(f"\n### Finding {i}")
+        parts.append(f"- **check_id**: {f.check_id}")
+        parts.append(f"- **path**: {f.path}")
+        parts.append(f"- **lines**: {f.line}–{f.end_line}")
+        parts.append(f"- **severity**: {f.severity}")
+        parts.append(f"- **claim**: {f.message}")
     return "\n".join(parts)
 
 
@@ -94,15 +106,3 @@ def build_group_message(group: "FindingGroup") -> str:
     return "\n".join(parts)
 
 
-def build_group_formatter_message(analysis: str, group: "FindingGroup") -> str:
-    """Build the formatter input for a group: analysis + all original findings."""
-    parts = ["## Analysis Record", analysis, "\n## Original Findings (cross-reference)"]
-    for i, bundle in enumerate(group.bundles):
-        f = bundle.finding
-        parts.append(f"\n### Finding {i}")
-        parts.append(f"- **check_id**: {f.check_id}")
-        parts.append(f"- **path**: {f.path}")
-        parts.append(f"- **lines**: {f.line}–{f.end_line}")
-        parts.append(f"- **severity**: {f.severity}")
-        parts.append(f"- **claim**: {f.message}")
-    return "\n".join(parts)

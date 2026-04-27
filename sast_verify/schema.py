@@ -59,6 +59,10 @@ class Verdict(BaseModel):
         default=[],
         description="file:line references that support the verdict",
     )
+    voting_tally: dict[str, int] | None = Field(
+        default=None,
+        description="Vote counts per verdict label when voting_rounds > 1 (e.g. {\"false_positive\": 2, \"true_positive\": 1})",
+    )
     claude_verdict_agrees: bool | None = Field(
         default=None,
         description="Whether Claude agrees with the verdict (true_positive/false_positive/uncertain)",
