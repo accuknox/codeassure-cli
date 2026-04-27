@@ -40,12 +40,12 @@ class ModelConfig(BaseModel):
     api_base: str | None = Field(default=None, description="API base URL (for self-hosted endpoints)")
     api_key: str | None = Field(default=None, description="API key (overrides env vars; supports $VAR_NAME syntax for env var references)")
     tool_calling: bool = Field(default=True, description="Set to false for models that don't support tool/function calling")
-    temperature: float | None = Field(default=0.0, description="Sampling temperature (0.0 = deterministic). Set null to use model default.")
+    temperature: float | None = Field(default=0.1, description="Sampling temperature (0.0 = deterministic). Set null to use model default.")
 
 
 class Config(BaseModel):
     model: ModelConfig
-    concurrency: int = Field(default=4, ge=1)
+    concurrency: int = Field(default=7, ge=1)
     stage_timeout: int = Field(default=120, ge=10, description="Seconds per LLM stage (analyzer or formatter)")
     finding_timeout: int = Field(default=300, ge=30, description="Seconds for the entire finding (both stages + repair)")
     grep_max_file_kb: int = Field(default=512, ge=1, description="Skip files larger than this in grep (KB)")

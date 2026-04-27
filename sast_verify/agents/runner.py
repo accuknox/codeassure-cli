@@ -29,7 +29,7 @@ from .deps import AnalyzerDeps
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONCURRENCY = 4
+DEFAULT_CONCURRENCY = 7
 MAX_GREP_FILE_SIZE_DEFAULT = 512 * 1024
 MAX_GREP_BYTES_DEFAULT = 5 * 1024 * 1024
 
