@@ -665,8 +665,7 @@ async def analyze_all(
             elapsed = time.perf_counter() - t0
             tally_str = f" votes={verdict.voting_tally}" if verdict.voting_tally else ""
             print(
-                f"[{done_counter[0]}/{total}] Finding #{index} — {verdict.verdict} "
-                f"({verdict.confidence} confidence){tally_str} — {elapsed:.1f}s",
+                f"[{done_counter[0]}/{total}] Finding #{index} — {elapsed:.1f}s",
                 flush=True,
             )
 
@@ -744,8 +743,7 @@ async def analyze_all_grouped(
                 done_counter[0] += 1
                 tally_str = f" votes={verdict.voting_tally}" if verdict.voting_tally else ""
                 print(
-                    f"[{done_counter[0]}/{total}] Finding #{orig_idx} — {verdict.verdict} "
-                    f"({verdict.confidence} confidence){tally_str} — {time.perf_counter() - t0:.1f}s",
+                    f"[{done_counter[0]}/{total}] Finding #{orig_idx} — {time.perf_counter() - t0:.1f}s",
                     flush=True,
                 )
 
