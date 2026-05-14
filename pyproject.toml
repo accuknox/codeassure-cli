@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codeassure"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI-powered SAST finding verification"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "pydantic-ai-slim[openai,anthropic]",
+    "pydantic-ai-slim[openai,anthropic,google]",
     "pydantic>=2.0",
     "anthropic>=0.40.0",
 ]

@@ -211,12 +211,12 @@ wheels = [
 
 [[package]]
 name = "codeassure"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "pydantic" },
-    { name = "pydantic-ai-slim", extra = ["anthropic", "openai"] },
+    { name = "pydantic-ai-slim", extra = ["anthropic", "google", "openai"] },
 ]
 
 [package.optional-dependencies]
@@ -234,7 +234,7 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'google'" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-ai-slim", extras = ["google"], marker = "extra == 'google'" },
-    { name = "pydantic-ai-slim", extras = ["openai", "anthropic"] },
+    { name = "pydantic-ai-slim", extras = ["openai", "anthropic", "google"] },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.0" },
 ]
 provides-extras = ["google", "build"]

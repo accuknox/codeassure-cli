@@ -1,0 +1,123 @@
+{
+  // ── Model (required) ────────────────────────────────────────────────────────
+  "model": {
+    // options: "openai" | "openai-compatible" | "anthropic" | "google" | "gemini"
+    "provider": "openai",
+
+    // model name as known by the provider (e.g. "gpt-4o", "claude-sonnet-4-6", "gemini-2.0-flash")
+    "name": "gemma-4-31B-it-NVFP4",
+
+    // API base URL for self-hosted / proxy endpoints — null to use provider default
+    "api_base": "http://100.92.xxx.x:xxxx",
+
+    // API key — null uses env var; "$MY_VAR" reads from env at runtime
+    "api_key": null,
+
+    // set false for models that don't support tool/function calling
+    // default: true
+    "tool_calling": true,
+
+    // sampling temperature — 0.0 = deterministic; null = model default
+    // default: 0.1
+    "temperature": 0.1
+  },
+
+  // ── Concurrency & timeouts ──────────────────────────────────────────────────
+
+  // max parallel LLM requests (overridden by --jobs CLI flag)
+  // default: 7
+  "concurrency": 7,
+
+  // seconds allowed per LLM stage (analyzer or formatter)
+  // default: 120
+  "stage_timeout": 120,
+
+  // seconds allowed for one complete finding (all stages + repair)
+  // default: 300
+  "finding_timeout": 300,
+
+  // max completion tokens per LLM call — null = uncapped
+  // default: 4096
+  "max_tokens": 4096,
+
+  // max agent.run() requests per finding (increase for reasoning/thinking models)
+  // default: 200
+  "request_limit": 200,
+
+  // ── Analysis mode ───────────────────────────────────────────────────────────
+
+  // true  → finding_only: LLM sees only the scanner-captured snippet, no file reads, no tools
+  // false → full / no_tools: pre-fetches code window from disk (controlled by tool_calling above)
+  // default: false
+  "findings_analysis": false,
+
+  // run each finding N times and pick the majority verdict
+  // 1 = single pass; 3 recommended for non-deterministic local models
+  // default: 1
+  "voting_rounds": 1,
+
+  // ── Grep limits (used when tool_calling = true) ──────────────────────────────
+
+  // skip files larger than this during grep (KB)
+  // default: 512
+  "grep_max_file_kb": 512,
+
+  // stop grep scanning after this many MB read across all files
+  // default: 5
+  "grep_max_scan_mb": 5,
+
+  // ── Verdict policy ───────────────────────────────────────────────────────────
+
+  "finding_policy": {
+    // treat missing-timeout, missing-encoding, mutable-default findings as TP if pattern exists
+    // default: true
+    "best_practice_is_tp": true,
+
+    // treat library-detection findings (detect-openai, detect-anthropic) as TP if library is used
+    // default: true
+    "informational_detection_is_tp": true,
+
+    // treat audit-rule findings (subprocess, pickle, shell=True) as TP if the call exists
+    // default: true
+    "audit_rule_is_tp": true
+  },
+
+  // ── Thinking map (reasoning models only) ────────────────────────────────────
+
+  // maps finding severity → thinking effort sent via extra_body
+  // options per severity: "full" | "low" | "off"
+  // omit entirely (or set null) to disable — no extra_body is sent
+  // default: null
+  "thinking_map": {
+    "ERROR":   "full",
+    "WARNING": "low",
+    "INFO":    "off"
+  },
+
+  // ── Validator (optional second-opinion model) ────────────────────────────────
+
+  // omit entirely to disable validator
+  "validator": {
+    // default: false
+    "enabled": false,
+
+    // options: "google-vertex" | "google-gla" | "openai" | "openai-compatible"
+    // default: "google-vertex"
+    "provider": "google-vertex",
+
+    // validator model name (e.g. "gemini-2.0-flash")
+    "name": "gemini-2.0-flash",
+
+    // GCP project for Vertex — null uses GOOGLE_CLOUD_PROJECT env var
+    "project": null,
+
+    // Vertex location (e.g. "global", "us-central1") — null uses GOOGLE_CLOUD_LOCATION env var
+    "location": null,
+
+    // API key for non-Vertex providers — null uses env var
+    "api_key": null,
+
+    // override base URL for openai-compatible validator — null uses provider default
+    "api_base": null
+  }
+}

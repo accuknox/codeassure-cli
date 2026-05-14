@@ -1,160 +1,158 @@
 from __future__ import annotations
 
+import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
 
-from .schema import Evidence, EvidenceBundle
+from .schema import Evidence, EvidenceBundle, Finding
 
-_CO_LOCATE_WINDOW = 3  # lines; findings within this gap are co-located
+log = logging.getLogger(__name__)
+
+CO_LOCATION_GAP = 3
 
 
 @dataclass
 class FindingGroup:
-    group_key: str                               # "file.py:187"
-    bundles: list[EvidenceBundle]                # findings in this group
-    original_indices: list[int]                  # maps position-in-group → original findings index
-    shared_evidence: list[Evidence]              # deduplicated code windows (for prompt + validation)
-    evidence_map: dict[int, list[Evidence]]      # original_index → finding's original evidence
-    relationship: str                            # "co-located" | "solo"
-    coherence_note: str | None                   # injected into prompt if co-located
+    """A cluster of related findings to be analyzed together."""
+
+    group_key: str  # e.g. "nessus/nessus.py:187"
+    bundles: list[EvidenceBundle]
+    original_indices: list[int]  # position-in-group → original findings index
+    shared_evidence: list[Evidence]  # deduplicated code windows (for prompt + validation)
+    evidence_map: dict[int, list[Evidence]]  # original_index → finding's own evidence
+    relationship: str  # "co-located" | "solo"
+    coherence_note: str | None = None
 
 
-def _merge_two(a: Evidence, b: Evidence) -> Evidence:
-    """Merge two overlapping or adjacent evidence windows (same path)."""
-    new_start = min(a.start_line, b.start_line)
-    new_end = max(a.end_line, b.end_line)
+def _short_check_id(check_id: str) -> str:
+    return check_id.rsplit(".", 1)[-1]
 
-    a_lines = a.content.splitlines()
-    b_lines = b.content.splitlines()
 
-    # Build line-number → text mapping from both windows
-    line_map: dict[int, str] = {}
-    for i, line in enumerate(a_lines):
-        line_map[a.start_line + i] = line
-    for i, line in enumerate(b_lines):
-        ln = b.start_line + i
-        if ln not in line_map:
-            line_map[ln] = line
-
-    merged = [line_map.get(ln, "") for ln in range(new_start, new_end + 1)]
-    return Evidence(
-        path=a.path,
-        start_line=new_start,
-        end_line=new_end,
-        content="\n".join(merged),
-    )
+def compute_pattern_stats(findings: list[Finding]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for f in findings:
+        counts[_short_check_id(f.check_id)] += 1
+    return dict(counts)
 
 
 def deduplicate_evidence(bundles: list[EvidenceBundle]) -> list[Evidence]:
-    """Merge overlapping/adjacent code windows across all bundles in a group."""
-    if not bundles:
+    all_ev: list[Evidence] = []
+    for b in bundles:
+        all_ev.extend(b.evidence)
+
+    if not all_ev:
         return []
 
-    # Collect all evidence, grouped by path
-    by_path: dict[str, list[Evidence]] = {}
-    for b in bundles:
-        for ev in b.evidence:
-            by_path.setdefault(ev.path, []).append(ev)
+    by_path: dict[str, list[Evidence]] = defaultdict(list)
+    for ev in all_ev:
+        by_path[ev.path].append(ev)
 
-    result: list[Evidence] = []
-    for evs in by_path.values():
-        sorted_evs = sorted(evs, key=lambda e: e.start_line)
-        merged: list[Evidence] = [sorted_evs[0]]
-        for ev in sorted_evs[1:]:
-            last = merged[-1]
-            # Merge if overlapping or adjacent (within 1 line)
-            if ev.start_line <= last.end_line + 1:
-                merged[-1] = _merge_two(last, ev)
+    merged: list[Evidence] = []
+    for path, evs in by_path.items():
+        evs.sort(key=lambda e: e.start_line)
+        current = evs[0]
+        for ev in evs[1:]:
+            if ev.start_line <= current.end_line + CO_LOCATION_GAP:
+                if ev.end_line > current.end_line:
+                    wider = ev if (ev.end_line - ev.start_line) > (current.end_line - current.start_line) else current
+                    current = Evidence(
+                        path=path,
+                        start_line=current.start_line,
+                        end_line=ev.end_line,
+                        content=wider.content,
+                    )
             else:
-                merged.append(ev)
-        result.extend(merged)
+                merged.append(current)
+                current = ev
+        merged.append(current)
 
-    return result
+    return merged
 
 
 def build_evidence_map(
     bundles: list[EvidenceBundle],
     original_indices: list[int],
 ) -> dict[int, list[Evidence]]:
-    """Per-finding evidence windows for post-analysis validation."""
-    return {
-        original_indices[i]: list(bundle.evidence)
-        for i, bundle in enumerate(bundles)
-    }
+    emap: dict[int, list[Evidence]] = {}
+    for idx, bundle in zip(original_indices, bundles):
+        emap[idx] = list(bundle.evidence)
+    return emap
+
+
+def _build_coherence_note(bundles: list[EvidenceBundle]) -> str | None:
+    if len(bundles) <= 1:
+        return None
+    checks = [_short_check_id(b.finding.check_id) for b in bundles]
+    unique_checks = list(dict.fromkeys(checks))
+    check_str = ", ".join(unique_checks)
+    path = bundles[0].finding.path
+    lines = sorted(set(b.finding.line for b in bundles))
+    line_str = str(lines[0]) if len(lines) == 1 else f"{lines[0]}-{lines[-1]}"
+    return (
+        f"{len(bundles)} findings on the same code at {path}:{line_str} "
+        f"({check_str}). "
+        "These describe the same code — verdicts must be coherent."
+    )
 
 
 def build_groups(
     bundles: list[EvidenceBundle],
     original_indices: list[int],
 ) -> list[FindingGroup]:
-    """Group by file → cluster by line proximity (within 3 lines).
-
-    Clusters with 2+ findings → co-located group. Singles → solo.
-    No same-file mega-grouping in Phase 1.
-    """
-    if not bundles:
-        return []
-
-    # Group by file path
-    by_file: dict[str, list[tuple[int, EvidenceBundle]]] = {}
-    for orig_idx, bundle in zip(original_indices, bundles):
-        by_file.setdefault(bundle.finding.path, []).append((orig_idx, bundle))
+    by_file: dict[str, list[tuple[int, EvidenceBundle]]] = defaultdict(list)
+    for idx, bundle in zip(original_indices, bundles):
+        by_file[bundle.finding.path].append((idx, bundle))
 
     groups: list[FindingGroup] = []
 
-    for path, items in by_file.items():
-        # Sort by finding line number
-        items_sorted = sorted(items, key=lambda x: x[1].finding.line)
+    for path, file_entries in by_file.items():
+        file_entries.sort(key=lambda x: x[1].finding.line)
 
-        # Cluster by evidence-window proximity
         clusters: list[list[tuple[int, EvidenceBundle]]] = []
-        current: list[tuple[int, EvidenceBundle]] = [items_sorted[0]]
+        current_cluster: list[tuple[int, EvidenceBundle]] = [file_entries[0]]
+        cluster_end = file_entries[0][1].finding.end_line
 
-        for item in items_sorted[1:]:
-            prev_bundle = current[-1][1]
-            curr_bundle = item[1]
-
-            prev_end = max(
-                (ev.end_line for ev in prev_bundle.evidence),
-                default=prev_bundle.finding.end_line,
-            )
-            curr_start = min(
-                (ev.start_line for ev in curr_bundle.evidence),
-                default=curr_bundle.finding.line,
-            )
-
-            if curr_start <= prev_end + _CO_LOCATE_WINDOW:
-                current.append(item)
+        for idx, bundle in file_entries[1:]:
+            if bundle.finding.line <= cluster_end + CO_LOCATION_GAP:
+                current_cluster.append((idx, bundle))
+                cluster_end = max(cluster_end, bundle.finding.end_line)
             else:
-                clusters.append(current)
-                current = [item]
-        clusters.append(current)
+                clusters.append(current_cluster)
+                current_cluster = [(idx, bundle)]
+                cluster_end = bundle.finding.end_line
+        clusters.append(current_cluster)
 
         for cluster in clusters:
-            cluster_orig_indices = [x[0] for x in cluster]
-            cluster_bundles = [x[1] for x in cluster]
+            c_indices = [idx for idx, _ in cluster]
+            c_bundles = [b for _, b in cluster]
+            first_line = c_bundles[0].finding.line
 
-            is_co_located = len(cluster) >= 2
-            shared_evidence = deduplicate_evidence(cluster_bundles)
-            evidence_map = build_evidence_map(cluster_bundles, cluster_orig_indices)
+            if len(cluster) == 1:
+                groups.append(FindingGroup(
+                    group_key=f"{path}:{first_line}",
+                    bundles=c_bundles,
+                    original_indices=c_indices,
+                    shared_evidence=list(c_bundles[0].evidence),
+                    evidence_map={c_indices[0]: list(c_bundles[0].evidence)},
+                    relationship="solo",
+                ))
+            else:
+                groups.append(FindingGroup(
+                    group_key=f"{path}:{first_line}",
+                    bundles=c_bundles,
+                    original_indices=c_indices,
+                    shared_evidence=deduplicate_evidence(c_bundles),
+                    evidence_map=build_evidence_map(c_bundles, c_indices),
+                    relationship="co-located",
+                    coherence_note=_build_coherence_note(c_bundles),
+                ))
 
-            min_line = min(b.finding.line for b in cluster_bundles)
-            group_key = f"{path}:{min_line}"
-
-            coherence_note: str | None = None
-            if is_co_located:
-                coherence_note = (
-                    f"These {len(cluster)} findings are co-located on the same code region. "
-                    "Your reachability and risk assessment must be consistent across all of them."
-                )
-
-            groups.append(FindingGroup(
-                group_key=group_key,
-                bundles=cluster_bundles,
-                original_indices=cluster_orig_indices,
-                shared_evidence=shared_evidence,
-                evidence_map=evidence_map,
-                relationship="co-located" if is_co_located else "solo",
-                coherence_note=coherence_note,
-            ))
+    co_count = sum(1 for g in groups if g.relationship == "co-located")
+    solo_count = sum(1 for g in groups if g.relationship == "solo")
+    co_findings = sum(len(g.bundles) for g in groups if g.relationship == "co-located")
+    log.info(
+        "Grouped %d findings into %d groups (co-located=%d covering %d findings, solo=%d)",
+        len(bundles), len(groups), co_count, co_findings, solo_count,
+    )
 
     return groups

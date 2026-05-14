@@ -43,6 +43,10 @@ def compact_finding(item: dict) -> Finding:
     return Finding(**fields)
 
 
+def preprocess_data(data: dict) -> list[Finding]:
+    return [compact_finding(r) for r in data.get("results", [])]
+
+
 def preprocess(results_path: Path) -> list[Finding]:
     data = json.loads(results_path.read_text(encoding="utf-8"))
-    return [compact_finding(r) for r in data.get("results", [])]
+    return preprocess_data(data)

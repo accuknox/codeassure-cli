@@ -35,12 +35,20 @@ def main() -> None:
         help="Max concurrent LLM requests (overrides config)",
     )
     parser.add_argument(
+        "--no-grouping", action="store_true", default=False,
+        help="Disable finding grouping (analyze each finding independently)",
+    )
+    parser.add_argument(
         "--verify", type=Path, default=None, metavar="FILE",
         help="Compare output against a ground-truth JSON (final_results.json) and write a CSV report",
     )
     parser.add_argument(
         "--anthropic-key", type=str, default=None, metavar="KEY",
         help="Anthropic API key for Claude verdict validation (overrides ANTHROPIC_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--repo-id", type=str, default=None, metavar="ID",
+        help="Repository ID for AccuKnox finding lookup (overrides ACCUKNOX_REPO_ID env var)",
     )
     parser.add_argument(
         "--grouping", action="store_true", default=False,
@@ -59,6 +67,8 @@ def main() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     if args.anthropic_key:
         os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
+    if args.repo_id:
+        os.environ["ACCUKNOX_REPO_ID"] = args.repo_id
 
     from .config import load_config
     from .pipeline import run, verify

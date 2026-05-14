@@ -8,6 +8,9 @@ dist/
 # Sample data and benchmark outputs
 samples/
 
+# Reference/legacy implementations
+references/
+
 # Generated context dumps
 llms-full.txt
 

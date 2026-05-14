@@ -43,6 +43,33 @@ class ModelConfig(BaseModel):
     temperature: float | None = Field(default=0.1, description="Sampling temperature (0.0 = deterministic). Set null to use model default.")
 
 
+class ValidatorConfig(BaseModel):
+    """Second-opinion validator. Skipped entirely when enabled=False."""
+    enabled: bool = Field(default=False, description="Run validator after each verdict")
+    provider: str = Field(default="google-vertex", description="'google-vertex', 'google-gla', 'openai', or 'openai-compatible'")
+    name: str = Field(description="Validator model name, e.g. 'gemini-3.1-pro-preview'")
+    project: str | None = Field(default=None, description="GCP project for Vertex (else uses GOOGLE_CLOUD_PROJECT env)")
+    location: str | None = Field(default=None, description="Vertex location, e.g. 'global' (else GOOGLE_CLOUD_LOCATION)")
+    api_key: str | None = Field(default=None, description="API key for non-Vertex providers")
+    api_base: str | None = Field(default=None, description="Override base URL (OpenAI-compatible only)")
+
+
+class FindingPolicy(BaseModel):
+    """Controls what the model considers a true positive."""
+    best_practice_is_tp: bool = Field(
+        default=True,
+        description="Treat best-practice findings (missing timeout, missing encoding, mutable defaults) as TP if the pattern exists",
+    )
+    informational_detection_is_tp: bool = Field(
+        default=True,
+        description="Treat informational detection findings (detect-openai, detect-anthropic) as TP if the library is used",
+    )
+    audit_rule_is_tp: bool = Field(
+        default=True,
+        description="Treat audit-rule findings (subprocess usage, pickle usage) as TP if the call exists, regardless of input trust",
+    )
+
+
 class Config(BaseModel):
     model: ModelConfig
     concurrency: int = Field(default=7, ge=1)
@@ -52,6 +79,13 @@ class Config(BaseModel):
     grep_max_scan_mb: int = Field(default=5, ge=1, description="Stop grep scanning after this many MB read")
     request_limit: int = Field(default=200, ge=1, description="Max requests per agent.run() call (reasoning models need more)")
     voting_rounds: int = Field(default=1, ge=1, description="Run each finding N times and take majority verdict (3 recommended for non-deterministic local models)")
+    max_tokens: int | None = Field(default=4096, description="Max completion tokens per LLM call. Set to null for uncapped.")
+    finding_policy: FindingPolicy = Field(default_factory=FindingPolicy, description="Controls what counts as true_positive")
+    validator: ValidatorConfig | None = Field(default=None, description="Optional second-opinion validator (e.g. Gemini via Vertex)")
+    findings_analysis: bool = Field(
+        default=False,
+        description="Set to true for finding_only mode: LLM sees only the scanner-captured snippet, no file reads or tools.",
+    )
     thinking_map: dict[str, ThinkingMode] | None = Field(
         # default_factory=lambda: dict(_DEFAULT_THINKING_MAP),
         default=None,
@@ -131,6 +165,35 @@ class Config(BaseModel):
         if api_key is not None:
             kwargs["api_key"] = api_key
         return GoogleModel(self.model.name, provider=GoogleProvider(**kwargs))
+
+    def build_validator_model(self):
+        """Build a PydanticAI model for the validator. Branches on provider."""
+        if self.validator is None:
+            raise RuntimeError("validator is not configured")
+        v = self.validator
+        if v.provider in ("google-vertex", "google-gla"):
+            from pydantic_ai.models.google import GoogleModel
+            from pydantic_ai.providers.google import GoogleProvider
+            kwargs: dict = {}
+            if v.provider == "google-vertex":
+                kwargs["vertexai"] = True
+                if v.project:
+                    kwargs["project"] = v.project
+                if v.location:
+                    kwargs["location"] = v.location
+            elif v.api_key:
+                kwargs["api_key"] = v.api_key
+            return GoogleModel(v.name, provider=GoogleProvider(**kwargs))
+        if v.provider in _OPENAI_COMPATIBLE_PROVIDERS:
+            from pydantic_ai.models.openai import OpenAIChatModel
+            from pydantic_ai.providers.openai import OpenAIProvider
+            kwargs = {}
+            if v.api_base:
+                kwargs["base_url"] = v.api_base
+            if v.api_key:
+                kwargs["api_key"] = v.api_key
+            return OpenAIChatModel(v.name, provider=OpenAIProvider(**kwargs))
+        raise ValueError(f"Unsupported validator provider: {v.provider!r}")
 
     def apply(self) -> None:
         """Set LiteLLM env vars from config. API keys come from .env / environment."""

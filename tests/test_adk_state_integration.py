@@ -112,7 +112,7 @@ def codebase(tmp_path):
 
 
 def _make_analyzer_model():
-    """FunctionModel that calls read_file then returns an analysis."""
+    """FunctionModel that calls read_file then returns an analysis (text-output analyzer)."""
     from pydantic_ai.models.function import FunctionModel, AgentInfo
 
     call_count = 0
@@ -148,6 +148,39 @@ def _make_analyzer_model():
     return FunctionModel(callback)
 
 
+def _make_structured_analyzer_model():
+    """FunctionModel that calls read_file then returns a Verdict as JSON in text (PromptedOutput)."""
+    from pydantic_ai.models.function import FunctionModel, AgentInfo
+
+    call_count = 0
+
+    def callback(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal call_count
+        call_count += 1
+
+        if call_count == 1:
+            # First call: invoke read_file tool
+            return ModelResponse(parts=[
+                ToolCallPart(
+                    tool_name="read_file",
+                    args=json.dumps({"path": "src/app.py", "start_line": 1, "end_line": 5}),
+                ),
+            ])
+        # Second call: return Verdict as JSON text (PydanticAI parses with PromptedOutput).
+        return ModelResponse(parts=[
+            TextPart(content=json.dumps({
+                "verdict": "true_positive",
+                "is_security_vulnerability": True,
+                "severity": "high",
+                "confidence": "high",
+                "reason": "User input returned without sanitization.",
+                "evidence_locations": ["src/app.py:4"],
+            })),
+        ])
+
+    return FunctionModel(callback)
+
+
 def _make_formatter_model(valid_json: bool = True):
     """FunctionModel that returns a verdict JSON (optionally invalid on first try)."""
     from pydantic_ai.models.function import FunctionModel, AgentInfo
@@ -179,7 +212,7 @@ def _make_formatter_model(valid_json: bool = True):
 
 
 def _build_test_analyzer():
-    """Build an analyzer Agent with a placeholder model (override before use)."""
+    """Build a text-output analyzer Agent (used by tool-call test that expects str output)."""
     from pydantic_ai import Agent
     from pydantic_ai.models.test import TestModel
 
@@ -192,6 +225,26 @@ def _build_test_analyzer():
         deps_type=AnalyzerDeps,
         instructions=ANALYZER_INSTRUCTION,
         tools=[read_file, grep_code],
+    )
+
+
+def _build_test_structured_analyzer():
+    """Build an analyzer Agent that returns a structured Verdict (matches production)."""
+    from pydantic_ai import Agent, PromptedOutput
+    from pydantic_ai.models.test import TestModel
+
+    from sast_verify.agents.deps import AnalyzerDeps
+    from sast_verify.agents.tools import grep_code, read_file
+    from sast_verify.prompts.analyzer import ANALYZER_INSTRUCTION
+    from sast_verify.schema import Verdict
+
+    return Agent(
+        TestModel(),
+        deps_type=AnalyzerDeps,
+        output_type=PromptedOutput(Verdict),
+        instructions=ANALYZER_INSTRUCTION,
+        tools=[read_file, grep_code],
+        output_retries=3,
     )
 
 
@@ -264,12 +317,11 @@ async def test_formatter_repair_loop_with_message_history(codebase):
 
 @pytest.mark.anyio
 async def test_full_analyze_one_pipeline(codebase):
-    """End-to-end _analyze_one: analyzer → formatter → verdict with evidence validation."""
+    """End-to-end _analyze_one: structured analyzer → verdict with evidence validation."""
     from sast_verify.agents.runner import _analyze_one
     from sast_verify.schema import Evidence, EvidenceBundle, Finding
 
-    analyzer = _build_test_analyzer()
-    formatter = _build_test_formatter()
+    analyzer = _build_test_structured_analyzer()
 
     bundle = EvidenceBundle(
         finding=Finding(
@@ -293,10 +345,9 @@ async def test_full_analyze_one_pipeline(codebase):
         ],
     )
 
-    with analyzer.override(model=_make_analyzer_model()), \
-         formatter.override(model=_make_formatter_model(valid_json=True)):
+    with analyzer.override(model=_make_structured_analyzer_model()):
         verdict = await _analyze_one(
-            analyzer, formatter,
+            analyzer,
             bundle, codebase, index=0,
             stage_timeout=30,
         )

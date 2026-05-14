@@ -1,11 +1,11 @@
 {
-  "model": {
+ "model": {
     "provider": "openai",
-    "name": "qwen35-nvfp4",
-    "api_base": "http://localhost:5000",
-    "temperature": 0.1
+    "name": "gemma-4-31B-it-NVFP4",
+    "api_base": "http://localhost:47821/v1"
   },
-  "concurrency": 7,
-  "stage_timeout": 300,
-  "finding_timeout": 600
+  "concurrency": 48,
+  "stage_timeout": 600,
+  "finding_timeout": 900,
+  "max_tokens": 16384
 }

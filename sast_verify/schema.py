@@ -45,12 +45,12 @@ class Verdict(BaseModel):
         description="True if the finding represents an exploitable security vulnerability; "
         "false if it is a best-practice recommendation, style issue, or informational notice",
     )
-    confidence: Literal["high", "medium", "low"] = Field(
-        description="Confidence level of the verdict",
-    )
     severity: Literal["critical", "high", "medium", "low"] = Field(
         default="low",
-        description="Severity of the finding. Assessed severity for true_positive; always 'low' for false_positive/uncertain.",
+        description="Assessed severity for true_positive; always 'low' for false_positive/uncertain.",
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence level of the verdict",
     )
     reason: str = Field(
         description="Plain-English explanation of the verdict, no source code",
@@ -61,11 +61,11 @@ class Verdict(BaseModel):
     )
     voting_tally: dict[str, int] | None = Field(
         default=None,
-        description="Vote counts per verdict label when voting_rounds > 1 (e.g. {\"false_positive\": 2, \"true_positive\": 1})",
+        description="Vote counts per verdict label when voting_rounds > 1",
     )
     claude_verdict_agrees: bool | None = Field(
         default=None,
-        description="Whether Claude agrees with the verdict (true_positive/false_positive/uncertain)",
+        description="Whether Claude agrees with the verdict",
     )
     claude_vuln_agrees: bool | None = Field(
         default=None,
@@ -73,5 +73,32 @@ class Verdict(BaseModel):
     )
     claude_reason: str | None = Field(
         default=None,
-        description="Claude's reasoning for its validation of both the verdict and vulnerability classification",
+        description="Claude's reasoning for its validation",
+    )
+    validator_verdict_agrees: bool | None = Field(
+        default=None,
+        description="Whether the validator model agrees with the verdict",
+    )
+    validator_vuln_agrees: bool | None = Field(
+        default=None,
+        description="Whether the validator model agrees with the is_security_vulnerability flag",
+    )
+    validator_reason: str | None = Field(
+        default=None,
+        description="Validator's reasoning for its agreement/disagreement",
+    )
+
+
+class ValidationResult(BaseModel):
+    """Structured output from the validator agent (second-opinion review)."""
+    verdict_agrees: bool = Field(description="True if the verdict label is correct")
+    vuln_agrees: bool = Field(description="True if the is_security_vulnerability flag is correct")
+    reason: str = Field(description="1-3 sentence explanation covering both judgements")
+
+
+class GroupVerdicts(BaseModel):
+    """Wrapper for grouped finding verdicts. Keys are stringified finding numbers (0, 1, ...)."""
+    verdicts: dict[str, Verdict] = Field(
+        description="Verdict per finding, keyed by stringified finding number (e.g. \"0\", \"1\"). "
+        "Must include exactly one entry for each finding number shown in the prompt.",
     )
