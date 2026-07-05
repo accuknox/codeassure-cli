@@ -22,6 +22,8 @@ class Finding(BaseModel):
     taint_source: str | None = None
     taint_sink: str | None = None
     fix: str | None = None
+    # Deterministic source→sink graph from context-graph-cli (None if not run).
+    context_graph: dict | None = None
 
 
 class Evidence(BaseModel):
@@ -94,6 +96,61 @@ class ValidationResult(BaseModel):
     verdict_agrees: bool = Field(description="True if the verdict label is correct")
     vuln_agrees: bool = Field(description="True if the is_security_vulnerability flag is correct")
     reason: str = Field(description="1-3 sentence explanation covering both judgements")
+
+
+class Remediation(BaseModel):
+    """Contextual, copy-paste fix that preserves business logic."""
+    summary: str = Field(description="One-line description of the fix")
+    code_patch: str = Field(
+        default="",
+        description="Copy-paste-ready corrected code for the affected node(s). "
+        "Must preserve the surrounding business logic and function contract.",
+    )
+    preserves_logic: bool = Field(
+        default=True,
+        description="True if applying the patch does not change intended behaviour",
+    )
+    notes: str = Field(default="", description="Caveats, follow-ups, or config changes needed")
+
+
+class PathColoring(BaseModel):
+    """Color verdict for one context-graph path."""
+    id: str = Field(description="Path id from the context graph (e.g. 'p0')")
+    status: Literal["vulnerable", "safe", "node-protected", "deadcode", "unknown"]
+    color: Literal["red", "green", "blue", "gray"]
+    reason: str = Field(default="", description="Why this path got this classification")
+
+
+class NodeColoring(BaseModel):
+    """Color verdict for one context-graph node."""
+    id: str = Field(description="Node id from the context graph (e.g. 'n0', 'n_sink')")
+    status: str = Field(default="", description="e.g. source, sink, protected, sanitizer")
+    color: Literal["red", "orange", "green", "blue", "gray"]
+
+
+class GraphColoring(BaseModel):
+    """Per-path / per-node color overlay applied to the deterministic graph."""
+    paths: list[PathColoring] = Field(default_factory=list)
+    nodes: list[NodeColoring] = Field(default_factory=list)
+
+
+class Enrichment(BaseModel):
+    """Enriched, UI-facing explanation of a finding, produced after the verdict.
+
+    Reasons over the deterministic context graph (plus optional tool calls) to
+    explain the finding in business terms, give a safe copy-paste remediation,
+    and color-code the graph (red=exploitable, green=safe, blue=node-protected,
+    gray=deadcode).
+    """
+    rationale: str = Field(description="Why the verdict holds — the security reasoning")
+    business_logic: str = Field(
+        description="What this code does functionally / its role in the app, in plain terms",
+    )
+    explanation: str = Field(
+        description="Enriched, developer-facing description of the finding and its data flow",
+    )
+    remediation: Remediation
+    coloring: GraphColoring = Field(default_factory=GraphColoring)
 
 
 class GroupVerdicts(BaseModel):

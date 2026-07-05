@@ -40,6 +40,10 @@ def compact_finding(item: dict) -> Finding:
     if fix := extra.get("fix"):
         fields["fix"] = fix
 
+    # Deterministic source→sink graph attached by context-graph-cli (if it ran).
+    if cg := item.get("context_graph"):
+        fields["context_graph"] = cg
+
     return Finding(**fields)
 
 

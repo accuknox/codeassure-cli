@@ -21,3 +21,4 @@ llms-full.txt
 .DS_Store
 
 build/
+.gstack/

@@ -43,6 +43,73 @@ def _get_finding_policy_note() -> str | None:
     )
 
 
+def _build_context_graph_section(finding, max_paths: int = 8, max_code: int = 900) -> str | None:
+    """Render the deterministic source→sink context graph as prompt grounding.
+
+    The model is handed the real flow (source → intermediates → sink) with each
+    function's exact code, plus deterministic reachability/protection hints — so
+    it rules on complete evidence instead of guessing via grep.
+    """
+    cg = getattr(finding, "context_graph", None)
+    if not cg or not isinstance(cg, dict):
+        return None
+    nodes = {n.get("id"): n for n in cg.get("nodes", [])}
+    paths = cg.get("paths", []) or []
+    if not nodes:
+        return None
+
+    stats = cg.get("stats", {})
+    parts = ["\n## Context Graph (deterministic source→sink analysis)"]
+    parts.append(
+        f"- engine: {cg.get('engine', '?')} | language: {cg.get('language', '?')} | "
+        f"paths: {len(paths)}"
+        + ("  ⚠ degraded (trust partial; verify with tools)" if stats.get("degraded") else "")
+    )
+    sink = cg.get("sink", {})
+    parts.append(f"- sink: {sink.get('file')}:{sink.get('line')}")
+
+    for p in paths[:max_paths]:
+        prot = p.get("protection", {}) or {}
+        flags = []
+        if prot.get("has_sanitizer"):
+            flags.append("sanitizer-on-path")
+        if prot.get("has_guard"):
+            flags.append("guard-on-path")
+        flag_str = ", ".join(flags) if flags else "no protection detected"
+        parts.append(
+            f"\n**Path {p.get('id')}** [{p.get('reachability', '?')}, "
+            f"{'tainted' if p.get('tainted') else 'structural'}, {flag_str}]:"
+        )
+        chain = []
+        for nid in p.get("nodes", []):
+            n = nodes.get(nid, {})
+            label = f"{n.get('function') or n.get('label')} ({n.get('file')}:{n.get('line')})"
+            if n.get("kind") == "sink":
+                label += " [SINK]"
+            elif n.get("kind") == "source":
+                label += f" [SOURCE:{n.get('role', '')}]"
+            elif n.get("kind") == "sanitizer":
+                label += " [SANITIZER]"
+            chain.append(label)
+        parts.append("  " + " → ".join(chain))
+
+    # Unique function bodies referenced by the shown paths.
+    shown_ids = {nid for p in paths[:max_paths] for nid in p.get("nodes", [])}
+    seen_fns: set = set()
+    parts.append("\n### Node source")
+    for nid in shown_ids:
+        n = nodes.get(nid, {})
+        code = (n.get("code") or "").strip()
+        key = (n.get("file"), n.get("function"))
+        if not code or key in seen_fns:
+            continue
+        seen_fns.add(key)
+        parts.append(f"#### {n.get('function') or n.get('label')} — {n.get('file')}:{n.get('line')}")
+        parts.append(f"```\n{code[:max_code]}\n```")
+
+    return "\n".join(parts)
+
+
 def build_user_message(bundle: EvidenceBundle) -> str:
     f = bundle.finding
 
@@ -77,6 +144,10 @@ def build_user_message(bundle: EvidenceBundle) -> str:
         parts.append(f"- **taint_sink**: `{f.taint_sink}`")
     if f.fix:
         parts.append(f"- **suggested_fix**: {f.fix}")
+
+    graph_section = _build_context_graph_section(f)
+    if graph_section:
+        parts.append(graph_section)
 
     policy_note = _get_finding_policy_note()
     if policy_note:
@@ -124,6 +195,9 @@ def _finding_claim_block(index: int, bundle: EvidenceBundle) -> list[str]:
         parts.append(f"- **taint_sink**: `{f.taint_sink}`")
     if f.fix:
         parts.append(f"- **suggested_fix**: {f.fix}")
+    graph_section = _build_context_graph_section(f)
+    if graph_section:
+        parts.append(graph_section)
     return parts
 
 

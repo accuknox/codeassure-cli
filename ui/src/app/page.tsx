@@ -4,20 +4,40 @@ import { useState } from "react";
 import { motion } from "motion/react";
 import { FileUpload } from "@/components/FileUpload";
 import { ForceGraph } from "@/components/ForceGraph";
+import { FindingsList } from "@/components/FindingsList";
 import type { ScanResults } from "@/lib/types";
 
 export default function Home() {
   const [data, setData] = useState<ScanResults | null>(null);
+  const [view, setView] = useState<"list" | "map">("list");
 
   function handleLoad(raw: unknown) {
     const d = raw as ScanResults;
     if (d?.results) {
       setData(d);
+      // Per-finding detail route reads from sessionStorage.
+      try {
+        sessionStorage.setItem("codeassure-results", JSON.stringify(d));
+      } catch {}
     }
   }
 
   if (data) {
-    return <ForceGraph data={data} />;
+    // Findings-first: one row per finding → its own context graph.
+    if (view === "map") {
+      return (
+        <div className="relative">
+          <button
+            onClick={() => setView("list")}
+            className="absolute top-4 left-4 z-10 text-xs text-zinc-600 hover:text-zinc-900 bg-white/80 border border-zinc-200 rounded-md px-2.5 py-1"
+          >
+            ← Findings
+          </button>
+          <ForceGraph data={data} />
+        </div>
+      );
+    }
+    return <FindingsList data={data} onOpenMap={() => setView("map")} />;
   }
 
   return (

@@ -64,6 +64,20 @@ export function ConfidenceBadge({
   );
 }
 
+import { SEV_STYLE, type SevLevel } from "@/lib/severity";
+
+export function SeverityBadge({ level }: { level: SevLevel }) {
+  const c = SEV_STYLE[level];
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium border ${c.bg} ${c.border} ${c.text}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
+      {level}
+    </span>
+  );
+}
+
 export function SecurityBadge({ isSecurity }: { isSecurity: boolean }) {
   if (isSecurity) {
     return (

@@ -86,6 +86,12 @@ class Config(BaseModel):
         default=False,
         description="Set to true for finding_only mode: LLM sees only the scanner-captured snippet, no file reads or tools.",
     )
+    enrichment: bool = Field(
+        default=True,
+        description="Run the enrichment + graph-coloring pass after each verdict "
+        "(rationale, business logic, explanation, copy-paste remediation, colored context graph). "
+        "One extra LLM call per decided finding.",
+    )
     thinking_map: dict[str, ThinkingMode] | None = Field(
         # default_factory=lambda: dict(_DEFAULT_THINKING_MAP),
         default=None,

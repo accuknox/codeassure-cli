@@ -26,6 +26,31 @@ def _no_anchor_verdict() -> Verdict:
     )
 
 
+def _is_deadcode(finding) -> bool:
+    """True if the deterministic context graph proves the sink is unreachable.
+
+    Every path is dead / has no caller from any entry point → the flagged pattern
+    cannot be triggered. Set by context-graph-cli only for reliable front-ends.
+    """
+    cg = getattr(finding, "context_graph", None)
+    if not cg or not isinstance(cg, dict):
+        return False
+    paths = cg.get("paths") or []
+    return bool(paths) and all(p.get("reachability") == "deadcode" for p in paths)
+
+
+def _deadcode_verdict() -> Verdict:
+    return Verdict(
+        verdict="false_positive",
+        is_security_vulnerability=False,
+        severity="low",
+        confidence="high",
+        reason="Deterministic reachability analysis: the flagged sink has no data-flow "
+        "or caller path from any entry point (dead / unreachable code), so the pattern "
+        "cannot be triggered.",
+    )
+
+
 def _checkpoint_path(output_path: Path) -> Path:
     """Checkpoint file sits next to the output file."""
     return output_path.with_suffix(".checkpoint.json")
@@ -102,17 +127,88 @@ def _walk_codebase(codebase: Path) -> list[dict]:
     return entries
 
 
+_COLOR_RANK = {"red": 3, "blue": 2, "green": 1, "gray": 0, "orange": -1}
+
+
+def _apply_coloring(context_graph: dict, coloring, verdict) -> None:
+    """Color the graph deterministically from the LLM's PATH classifications.
+
+    The LLM decides each path's status (exploitable/safe/protected/deadcode) — the
+    semantic call. Node and edge colors are DERIVED so they are always consistent
+    and every element is colored (no kind-color fallback leaking through the UI):
+      red = source/sink anchor on an exploitable path · orange = intermediate hop
+      blue = protection node (sanitizer/guard) · green = node on a safe path
+      gray = deadcode / unreachable.
+    """
+    paths = context_graph.get("paths", [])
+    nodes = context_graph.get("nodes", [])
+    llm_path = {pc.id: pc for pc in coloring.paths}
+    is_vuln = verdict.verdict == "true_positive" and verdict.is_security_vulnerability
+
+    # 1. Path color/status — LLM where given, else a verdict-consistent default.
+    for p in paths:
+        pc = llm_path.get(p.get("id"))
+        if pc is not None:
+            p["status"], p["color"], p["verdict_reason"] = pc.status, pc.color, pc.reason
+        if not p.get("color"):
+            if p.get("reachability") == "deadcode":
+                p["status"], p["color"] = "deadcode", "gray"
+            elif is_vuln:
+                p["status"], p["color"] = "vulnerable", "red"
+            else:
+                p["status"], p["color"] = "safe", "gray"
+        # The verdict is authoritative on exploitability: a false-positive or
+        # not-a-security finding must never render red, whatever the LLM said.
+        if not is_vuln and p.get("color") == "red":
+            p["status"], p["color"] = "not-exploitable", "gray"
+    path_color = {p.get("id"): p.get("color") for p in paths}
+
+    # Protection nodes the LLM flagged (→ green), by id.
+    protect_ids = {
+        nc.id for nc in coloring.nodes
+        if nc.color in ("blue", "green") or "protect" in (nc.status or "").lower()
+        or "saniti" in (nc.status or "").lower()
+    }
+
+    # 2. Node color — ROLE-based, with path status overriding for gray/green:
+    #    source/route = blue · intermediate = orange · sink = red ·
+    #    deadcode/unreachable = gray · protection (or fully-safe path) = green.
+    for n in nodes:
+        nid, kind = n.get("id"), n.get("kind")
+        colors_on = [p.get("color") for p in paths if nid in p.get("nodes", [])]
+        if colors_on and all(c == "gray" for c in colors_on):
+            n["color"] = "gray"                       # only on deadcode/unreachable paths
+        elif colors_on and all(c == "green" for c in colors_on):
+            n["color"] = "green"                      # fully protected / safe
+        elif kind in ("sanitizer", "guard") or nid in protect_ids:
+            n["color"] = "green"                      # a protection point
+        elif kind in ("source", "route"):
+            n["color"] = "blue"                       # origination
+        elif kind == "sink":
+            n["color"] = "red"                        # the flagged vuln line
+        else:
+            n["color"] = "orange"                     # intermediate hop
+        n["status"] = n.get("status") or kind
+
+    # 3. Edge color = strongest path color it belongs to.
+    for e in context_graph.get("edges", []):
+        colors = [path_color[pid] for pid in e.get("paths", []) if path_color.get(pid)]
+        e["color"] = max(colors, key=lambda c: _COLOR_RANK.get(c, -1)) if colors else "gray"
+
+
 def _write_output(
     findings_path: Path,
     output_path: Path,
     verdicts: list[Verdict],
     findings: list | None = None,
     codebase: Path | None = None,
+    enrichments: dict | None = None,
 ) -> None:
     """Merge verdicts into original findings JSON and write output."""
     from .graph import build_finding_graph
     from .preprocess import compact_finding
 
+    enrichments = enrichments or {}
     raw = json.loads(findings_path.read_text(encoding="utf-8"))
     for i, (result, verdict) in enumerate(zip(raw["results"], verdicts)):
         verification: dict = {
@@ -130,13 +226,29 @@ def _write_output(
                 "reason": verdict.validator_reason,
             }
 
-        # Generate visual explanation graph
-        try:
-            finding = findings[i] if findings else compact_finding(result)
-            graph = build_finding_graph(finding, verdict)
-            verification["graph"] = graph
-        except Exception:
-            pass  # graph generation is best-effort
+        # Enrichment (rationale, business logic, remediation) + graph coloring.
+        enrichment = enrichments.get(i)
+        if enrichment is not None:
+            verification["rationale"] = enrichment.rationale
+            verification["business_logic"] = enrichment.business_logic
+            verification["explanation"] = enrichment.explanation
+            verification["remediation"] = enrichment.remediation.model_dump()
+
+        # Deterministic context graph (from context-graph-cli) gets colored in place;
+        # otherwise fall back to the legacy heuristic graph for the UI.
+        context_graph = result.get("context_graph")
+        if isinstance(context_graph, dict):
+            if enrichment is not None:
+                try:
+                    _apply_coloring(context_graph, enrichment.coloring, verdict)
+                except Exception:
+                    pass  # coloring is best-effort
+        else:
+            try:
+                finding = findings[i] if findings else compact_finding(result)
+                verification["graph"] = build_finding_graph(finding, verdict)
+            except Exception:
+                pass  # graph generation is best-effort
 
         result["verification"] = verification
 
@@ -191,7 +303,17 @@ def run(
             if (b.finding.impact or "NOT_AVAILABLE").upper() in severities
         ]
 
-    skipped = len(bundles) - len(to_analyze)
+    # Deterministic shortcut: gray out provably-dead sinks with no LLM call.
+    deadcode = [(i, b) for i, b in to_analyze if _is_deadcode(b.finding)]
+    if deadcode:
+        for i, _ in deadcode:
+            verdicts[i] = _deadcode_verdict()
+        dead_idx = {i for i, _ in deadcode}
+        to_analyze = [(i, b) for i, b in to_analyze if i not in dead_idx]
+        print(f"[deadcode] {len(deadcode)} finding(s) resolved as unreachable "
+              f"(deterministic, no LLM); {len(to_analyze)} remain", flush=True)
+
+    skipped = len(bundles) - len(to_analyze) - len(deadcode)
     print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI", flush=True)
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
@@ -282,7 +404,22 @@ def run(
             flush=True,
         )
 
-    _write_output(findings_path, output_path, verdicts, findings=findings, codebase=codebase)
+    # Enrichment + graph-coloring pass — one extra LLM call per decided finding.
+    enrichments: dict = {}
+    if cfg.enrichment:
+        dead_idx = {i for i, _ in deadcode}
+        enrich_items = [
+            (i, b, verdicts[i])
+            for i, b in enumerate(bundles)
+            if i not in dead_idx and verdicts[i].verdict in ("true_positive", "false_positive")
+        ]
+        if enrich_items:
+            from .agents.enrich import enrich_all
+            print(f"[enrich] enriching {len(enrich_items)} finding(s)…", flush=True)
+            enrichments = asyncio.run(enrich_all(enrich_items, codebase, concurrency))
+
+    _write_output(findings_path, output_path, verdicts, findings=findings,
+                  codebase=codebase, enrichments=enrichments)
 
     # Clean up checkpoint on successful completion
     cp = _checkpoint_path(output_path)
@@ -325,6 +462,41 @@ def _policy_covers_rule(check_id: str) -> bool:
     return get_rule_short_name(check_id) in _COLLAPSE_EXEMPT_RULES
 
 
+_EXT_LANG = {
+    ".py": "python", ".pyi": "python",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".java": "java", ".go": "go", ".rb": "ruby", ".php": "php", ".rs": "rust",
+    ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".hpp": "cpp",
+    ".cs": "csharp", ".kt": "kotlin", ".scala": "scala", ".swift": "swift",
+    ".sh": "bash", ".bash": "bash", ".yaml": "yaml", ".yml": "yaml",
+    ".tf": "terraform", ".hcl": "terraform", ".html": "html", ".json": "json",
+}
+
+
+def _finding_language(pred_result: dict, path: str) -> str:
+    """Language of a finding — prefer context-graph's detected language, else ext."""
+    lang = (pred_result.get("context_graph") or {}).get("language")
+    if lang:
+        return lang
+    base = os.path.basename(path).lower()
+    if base.startswith("dockerfile"):
+        return "dockerfile"
+    _, ext = os.path.splitext(base)
+    return _EXT_LANG.get(ext, ext.lstrip(".") or "unknown")
+
+
+def _confusion_metrics(c: dict) -> tuple[float, float, float, float, int]:
+    """(accuracy, precision, recall, f1, decided) from a tp/tn/fp/fn counter."""
+    tp, tn, fp, fn = c["tp"], c["tn"], c["fp"], c["fn"]
+    decided, correct = tp + tn + fp + fn, tp + tn
+    acc = correct / decided * 100 if decided else 0.0
+    prec = tp / (tp + fp) * 100 if (tp + fp) else 0.0
+    rec = tp / (tp + fn) * 100 if (tp + fn) else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    return acc, prec, rec, f1, decided
+
+
 def verify(
     output_path: Path,
     ground_truth_path: Path,
@@ -348,6 +520,10 @@ def verify(
 
     tp = fp = tn = fn = uncertain = 0
     rows = []
+    from collections import defaultdict
+    by_lang: dict[str, dict] = defaultdict(
+        lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0, "uncertain": 0}
+    )
 
     for i, (pr, tr) in enumerate(zip(pred_results, truth_results)):
         v = pr.get("verification", {})
@@ -376,20 +552,25 @@ def verify(
             effective = pred_verdict
 
         match = effective == gt_label
+        lang = _finding_language(pr, path)
 
+        cat = None
         if effective == "uncertain":
-            uncertain += 1
+            uncertain += 1; cat = "uncertain"
         elif effective == "true_positive" and gt_label == "true_positive":
-            tp += 1
+            tp += 1; cat = "tp"
         elif effective == "false_positive" and gt_label == "false_positive":
-            tn += 1
+            tn += 1; cat = "tn"
         elif effective == "true_positive" and gt_label == "false_positive":
-            fp += 1
+            fp += 1; cat = "fp"
         elif effective == "false_positive" and gt_label == "true_positive":
-            fn += 1
+            fn += 1; cat = "fn"
+        if cat:
+            by_lang[lang][cat] += 1
 
         rows.append({
             "index": i,
+            "language": lang,
             "check_id": check_id,
             "path": path,
             "line": start_line,
@@ -405,7 +586,7 @@ def verify(
         })
 
     fieldnames = [
-        "index", "check_id", "path", "line", "severity",
+        "index", "language", "check_id", "path", "line", "severity",
         "ground_truth", "verdict", "is_security_vulnerability",
         "effective", "confidence", "match",
         "ground_truth_reason", "predicted_reason",
@@ -438,8 +619,23 @@ def verify(
     print(f"   Precision: {precision:5.1f}%")
     print(f"   Recall:    {recall:5.1f}%")
     print(f"   F1:        {f1:5.1f}%")
-    print(f"{'='*60}")
-    print(f" CSV written to: {csv_path}")
+
+    # Per-language breakdown — where does the deterministic graph help most?
+    print(f"{'='*78}")
+    print(" Accuracy by language")
+    print(f"{'─'*78}")
+    print(f" {'language':<12} {'n':>4} {'TP':>4} {'TN':>4} {'FP':>4} {'FN':>4} "
+          f"{'unc':>4} {'acc%':>7} {'prec%':>7} {'rec%':>7} {'F1%':>7}")
+    print(f"{'─'*78}")
+    for lang in sorted(by_lang, key=lambda k: -sum(by_lang[k].values())):
+        c = by_lang[lang]
+        n = sum(c.values())
+        acc_l, prec_l, rec_l, f1_l, _ = _confusion_metrics(c)
+        print(f" {lang:<12} {n:>4} {c['tp']:>4} {c['tn']:>4} {c['fp']:>4} "
+              f"{c['fn']:>4} {c['uncertain']:>4} {acc_l:>7.1f} {prec_l:>7.1f} "
+              f"{rec_l:>7.1f} {f1_l:>7.1f}")
+    print(f"{'='*78}")
+    print(f" CSV written to: {csv_path}  (has a 'language' column for pivoting)")
 
     log.info("Verification: accuracy=%.1f%% (%d/%d), uncertain=%d",
              accuracy, correct, decided, uncertain)
