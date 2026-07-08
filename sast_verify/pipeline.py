@@ -130,45 +130,57 @@ def _walk_codebase(codebase: Path) -> list[dict]:
 _COLOR_RANK = {"red": 3, "blue": 2, "green": 1, "gray": 0, "orange": -1}
 
 
-def _apply_coloring(context_graph: dict, coloring, verdict) -> None:
-    """Color the graph deterministically from the LLM's PATH classifications.
+def _apply_coloring_deterministic(context_graph: dict, verdict) -> None:
+    """Color the graph as a PURE FUNCTION of (deterministic context graph + verdict).
 
-    The LLM decides each path's status (exploitable/safe/protected/deadcode) — the
-    semantic call. Node and edge colors are DERIVED so they are always consistent
-    and every element is colored (no kind-color fallback leaking through the UI):
-      red = source/sink anchor on an exploitable path · orange = intermediate hop
-      blue = protection node (sanitizer/guard) · green = node on a safe path
+    No LLM input is read — the graph topology is byte-deterministic (context-graph
+    guarantees it) and the verdict is deterministic/checkpointed, so the rendered
+    "code flow" is reproducible run-to-run. This replaced an LLM-driven coloring
+    whose per-path classification flipped between runs even for an identical graph.
+
+    Rules (verdict is authoritative on exploitability):
+      * deadcode / unreachable path            → gray
+      * security vuln (TP + is_security) :
+          reachable or tainted path            → red   (the exploit path; dominant)
+          otherwise                            → gray
+      * not a security vuln (FP, or TP non-security):
+          path carries a sanitizer/guard       → green (protection explains safety)
+          otherwise                            → gray  (never red)
+    Node and edge colors are DERIVED from path colors + node kind, so every element
+    is consistently colored:
+      red = sink/anchor on an exploitable path · orange = intermediate hop ·
+      blue = source/route origination · green = protection point / safe path ·
       gray = deadcode / unreachable.
     """
     paths = context_graph.get("paths", [])
     nodes = context_graph.get("nodes", [])
-    llm_path = {pc.id: pc for pc in coloring.paths}
     is_vuln = verdict.verdict == "true_positive" and verdict.is_security_vulnerability
 
-    # 1. Path color/status — LLM where given, else a verdict-consistent default.
+    # 1. Path color/status — derived from the deterministic graph + verdict.
     for p in paths:
-        pc = llm_path.get(p.get("id"))
-        if pc is not None:
-            p["status"], p["color"], p["verdict_reason"] = pc.status, pc.color, pc.reason
-        if not p.get("color"):
-            if p.get("reachability") == "deadcode":
-                p["status"], p["color"] = "deadcode", "gray"
-            elif is_vuln:
+        reach = p.get("reachability")
+        prot = p.get("protection") or {}
+        protected = bool(prot.get("has_sanitizer") or prot.get("has_guard"))
+        if reach == "deadcode":
+            p["status"], p["color"] = "deadcode", "gray"
+        elif is_vuln:
+            # exploitable finding: any live path IS the vulnerability → red.
+            if p.get("tainted") or reach == "reachable":
                 p["status"], p["color"] = "vulnerable", "red"
             else:
                 p["status"], p["color"] = "safe", "gray"
-        # The verdict is authoritative on exploitability: a false-positive or
-        # not-a-security finding must never render red, whatever the LLM said.
-        if not is_vuln and p.get("color") == "red":
-            p["status"], p["color"] = "not-exploitable", "gray"
+        else:
+            # not a security vuln → never red; protection (if any) explains why.
+            p["status"], p["color"] = ("protected", "green") if protected else ("safe", "gray")
     path_color = {p.get("id"): p.get("color") for p in paths}
 
-    # Protection nodes the LLM flagged (→ green), by id.
-    protect_ids = {
-        nc.id for nc in coloring.nodes
-        if nc.color in ("blue", "green") or "protect" in (nc.status or "").lower()
-        or "saniti" in (nc.status or "").lower()
-    }
+    # Protection node ids come from the DETERMINISTIC graph (sanitizer/guard nodes
+    # the analyzer recorded on each path), not from any LLM classification.
+    protect_ids: set[str] = set()
+    for p in paths:
+        prot = p.get("protection") or {}
+        protect_ids.update(prot.get("sanitizer_nodes") or [])
+        protect_ids.update(prot.get("guard_nodes") or [])
 
     # 2. Node color — ROLE-based, with path status overriding for gray/green:
     #    source/route = blue · intermediate = orange · sink = red ·
@@ -234,15 +246,16 @@ def _write_output(
             verification["explanation"] = enrichment.explanation
             verification["remediation"] = enrichment.remediation.model_dump()
 
-        # Deterministic context graph (from context-graph-cli) gets colored in place;
-        # otherwise fall back to the legacy heuristic graph for the UI.
+        # Deterministic context graph (from context-graph-cli) gets colored in place
+        # from (graph + verdict) alone — no LLM input — so it renders identically
+        # every run and even when the enrichment pass failed/was skipped. Otherwise
+        # fall back to the legacy heuristic graph for the UI.
         context_graph = result.get("context_graph")
         if isinstance(context_graph, dict):
-            if enrichment is not None:
-                try:
-                    _apply_coloring(context_graph, enrichment.coloring, verdict)
-                except Exception:
-                    pass  # coloring is best-effort
+            try:
+                _apply_coloring_deterministic(context_graph, verdict)
+            except Exception:
+                pass  # coloring is best-effort
         else:
             try:
                 finding = findings[i] if findings else compact_finding(result)

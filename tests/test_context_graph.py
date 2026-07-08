@@ -2,7 +2,7 @@
 
 from sast_verify.preprocess import compact_finding
 from sast_verify.prompts import _build_context_graph_section
-from sast_verify.pipeline import _apply_coloring, _is_deadcode
+from sast_verify.pipeline import _apply_coloring_deterministic, _is_deadcode
 from sast_verify.schema import (
     Enrichment,
     GraphColoring,
@@ -75,25 +75,49 @@ def _tp_verdict():
                    severity="high", confidence="high", reason="x")
 
 
-def test_apply_coloring_derives_node_colors_from_paths():
-    cg = _result_with_graph()["context_graph"]  # source n0 → sink n_sink, path p0
-    coloring = GraphColoring(
-        paths=[PathColoring(id="p0", status="vulnerable", color="red", reason="tainted")],
-        nodes=[],  # node colors are DERIVED now
-    )
-    _apply_coloring(cg, coloring, _tp_verdict())
+def _fp_verdict():
+    return Verdict(verdict="false_positive", is_security_vulnerability=False,
+                   severity="low", confidence="high", reason="x")
+
+
+def test_apply_coloring_derives_node_colors_from_graph_and_verdict():
+    cg = _result_with_graph()["context_graph"]  # source n0 → sink n_sink, tainted p0
+    _apply_coloring_deterministic(cg, _tp_verdict())
+    # tainted + reachable + security vuln → red path
     assert cg["paths"][0]["color"] == "red" and cg["paths"][0]["status"] == "vulnerable"
     # role-based node colors: source=blue, sink=red; exploitable path edge=red
     assert {n["id"]: n["color"] for n in cg["nodes"]} == {"n0": "blue", "n_sink": "red"}
     assert cg["edges"][0]["color"] == "red"
 
 
-def test_apply_coloring_fills_uncolored_paths_by_verdict():
+def test_apply_coloring_deadcode_is_gray():
     cg = _result_with_graph("deadcode")["context_graph"]
-    _apply_coloring(cg, GraphColoring(), _tp_verdict())  # no LLM colors
+    _apply_coloring_deterministic(cg, _tp_verdict())
     # deadcode path → gray regardless of verdict; every node colored (no None)
     assert cg["paths"][0]["color"] == "gray"
     assert all(n.get("color") for n in cg["nodes"])
+
+
+def test_apply_coloring_false_positive_never_red():
+    cg = _result_with_graph()["context_graph"]  # reachable + tainted graph
+    _apply_coloring_deterministic(cg, _fp_verdict())
+    # verdict is authoritative: a false positive must never render red anywhere
+    assert cg["paths"][0]["color"] != "red"
+    assert all(n.get("color") != "red" for n in cg["nodes"])
+    assert all(e.get("color") != "red" for e in cg["edges"])
+
+
+def test_apply_coloring_is_deterministic_and_llm_independent():
+    import copy
+    base = _result_with_graph()["context_graph"]
+    a = copy.deepcopy(base)
+    b = copy.deepcopy(base)
+    _apply_coloring_deterministic(a, _tp_verdict())
+    _apply_coloring_deterministic(b, _tp_verdict())
+    # same (graph, verdict) → identical colors, every run, no LLM input involved
+    assert [n["color"] for n in a["nodes"]] == [n["color"] for n in b["nodes"]]
+    assert [p["color"] for p in a["paths"]] == [p["color"] for p in b["paths"]]
+    assert [e["color"] for e in a["edges"]] == [e["color"] for e in b["edges"]]
 
 
 def test_enrichment_schema_roundtrip():

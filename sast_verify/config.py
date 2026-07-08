@@ -40,7 +40,7 @@ class ModelConfig(BaseModel):
     api_base: str | None = Field(default=None, description="API base URL (for self-hosted endpoints)")
     api_key: str | None = Field(default=None, description="API key (overrides env vars; supports $VAR_NAME syntax for env var references)")
     tool_calling: bool = Field(default=True, description="Set to false for models that don't support tool/function calling")
-    temperature: float | None = Field(default=0.1, description="Sampling temperature (0.0 = deterministic). Set null to use model default.")
+    temperature: float | None = Field(default=0.0, description="Sampling temperature (0.0 = deterministic; recommended default so verdicts are stable run-to-run). Raise (e.g. 0.5) only with voting_rounds>1, which needs sampling diversity. Set null to use model default.")
 
 
 class ValidatorConfig(BaseModel):

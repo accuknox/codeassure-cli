@@ -129,7 +129,10 @@ class NodeColoring(BaseModel):
 
 
 class GraphColoring(BaseModel):
-    """Per-path / per-node color overlay applied to the deterministic graph."""
+    """Per-path / per-node color overlay. ADVISORY / deprecated: graph colors are
+    now computed deterministically in pipeline._apply_coloring_deterministic from
+    the graph's own reachability/taint/protection fields + the verdict, so this LLM
+    overlay is no longer read. Kept for schema back-compat; may be empty."""
     paths: list[PathColoring] = Field(default_factory=list)
     nodes: list[NodeColoring] = Field(default_factory=list)
 

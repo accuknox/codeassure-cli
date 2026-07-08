@@ -93,8 +93,16 @@ def _build_context_graph_section(finding, max_paths: int = 8, max_code: int = 90
             chain.append(label)
         parts.append("  " + " → ".join(chain))
 
-    # Unique function bodies referenced by the shown paths.
-    shown_ids = {nid for p in paths[:max_paths] for nid in p.get("nodes", [])}
+    # Unique function bodies referenced by the shown paths, in first-appearance
+    # (flow) order — a set here made the prompt text vary run-to-run for an
+    # identical graph, perturbing the LLM; ordered dedup keeps it deterministic.
+    shown_ids: list = []
+    _seen_ids: set = set()
+    for p in paths[:max_paths]:
+        for nid in p.get("nodes", []):
+            if nid not in _seen_ids:
+                _seen_ids.add(nid)
+                shown_ids.append(nid)
     seen_fns: set = set()
     parts.append("\n### Node source")
     for nid in shown_ids:

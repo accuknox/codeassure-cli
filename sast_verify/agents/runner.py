@@ -676,8 +676,16 @@ def _validate_group_evidence(
 _CONFIDENCE_WEIGHT = {"high": 3, "medium": 2, "low": 1}
 
 
+# Tie-break priority when votes AND confidence weight are equal. Prefer flagging
+# (true_positive) over uncertain over false_positive so a genuine vuln is never
+# silently dropped on a coin-flip tie. Fully deterministic — no reliance on the
+# (parallel, completion-ordered) input list order.
+_VERDICT_TIE_PRIORITY = {"true_positive": 2, "uncertain": 1, "false_positive": 0}
+
+
 def _majority_verdict(verdicts: list[Verdict]) -> Verdict:
-    """Pick verdict with the most votes; break ties by total confidence weight."""
+    """Pick verdict with the most votes; break ties deterministically by total
+    confidence weight, then by a fixed verdict priority (never by input order)."""
     from collections import Counter
     counts: Counter = Counter(v.verdict for v in verdicts)
     max_votes = max(counts.values())
@@ -689,10 +697,14 @@ def _majority_verdict(verdicts: list[Verdict]) -> Verdict:
         weights: dict[str, int] = {}
         for v in verdicts:
             weights[v.verdict] = weights.get(v.verdict, 0) + _CONFIDENCE_WEIGHT.get(v.confidence, 1)
-        winner = max(candidates, key=lambda lbl: weights.get(lbl, 0))
+        # weight primary, fixed verdict priority secondary → deterministic winner.
+        winner = max(candidates,
+                     key=lambda lbl: (weights.get(lbl, 0), _VERDICT_TIE_PRIORITY.get(lbl, 0)))
 
     winners = [v for v in verdicts if v.verdict == winner]
-    best = max(winners, key=lambda v: _CONFIDENCE_WEIGHT.get(v.confidence, 0))
+    # confidence primary, reason text secondary → the SELECTED verdict object (and
+    # thus its reason/severity) is reproducible even when confidences tie.
+    best = max(winners, key=lambda v: (_CONFIDENCE_WEIGHT.get(v.confidence, 0), v.reason or ""))
     best.voting_tally = dict(counts)
     return best
 

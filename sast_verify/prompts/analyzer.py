@@ -29,6 +29,16 @@ justify the scanner's output.
 ## Analysis criteria
 
 1. **Reachability** — Can untrusted input reach the flagged code path?
+   When a **Context Graph** section is provided below, it is DETERMINISTIC evidence
+   (computed by static data-flow analysis, not guessed) — treat it as primary:
+   • a **tainted + reachable** path is strong evidence the finding is a true positive;
+   • **deadcode / unreachable** (all paths) is strong evidence of a false positive —
+     the flagged code cannot be driven by input;
+   • **no tainted path** on a non-degraded graph means taint was NOT proven — weigh
+     toward false positive unless you can show the reaching flow yourself with tools;
+   • a **sanitizer/guard on every path** means the input is neutralized before the sink.
+   Use your tools to confirm or refute the graph, but do not overturn it without
+   concrete code evidence. (If no Context Graph section appears, judge from the code.)
 2. **Mitigations** — Are there sanitization, validation, or framework
    protections already in place (even if different from the scanner's
    suggested fix)?
@@ -141,6 +151,16 @@ scanner's output.
 ## Analysis criteria
 
 1. **Reachability** — Can untrusted input reach the flagged code path?
+   When a **Context Graph** section is provided below, it is DETERMINISTIC evidence
+   (computed by static data-flow analysis, not guessed) — treat it as primary:
+   • a **tainted + reachable** path is strong evidence the finding is a true positive;
+   • **deadcode / unreachable** (all paths) is strong evidence of a false positive —
+     the flagged code cannot be driven by input;
+   • **no tainted path** on a non-degraded graph means taint was NOT proven — weigh
+     toward false positive unless you can show the reaching flow yourself with tools;
+   • a **sanitizer/guard on every path** means the input is neutralized before the sink.
+   Use your tools to confirm or refute the graph, but do not overturn it without
+   concrete code evidence. (If no Context Graph section appears, judge from the code.)
 2. **Mitigations** — Are there sanitization, validation, or framework protections?
 3. **Exploitability** — Is the issue exploitable in a realistic scenario?
 4. **Context** — Does the surrounding code change the risk assessment?
@@ -265,6 +285,16 @@ justify the scanner's output.
 ## Analysis criteria
 
 1. **Reachability** — Can untrusted input reach the flagged code path?
+   When a **Context Graph** section is provided below, it is DETERMINISTIC evidence
+   (computed by static data-flow analysis, not guessed) — treat it as primary:
+   • a **tainted + reachable** path is strong evidence the finding is a true positive;
+   • **deadcode / unreachable** (all paths) is strong evidence of a false positive —
+     the flagged code cannot be driven by input;
+   • **no tainted path** on a non-degraded graph means taint was NOT proven — weigh
+     toward false positive unless you can show the reaching flow yourself with tools;
+   • a **sanitizer/guard on every path** means the input is neutralized before the sink.
+   Use your tools to confirm or refute the graph, but do not overturn it without
+   concrete code evidence. (If no Context Graph section appears, judge from the code.)
 2. **Mitigations** — Are there sanitization, validation, or framework
    protections already in place?
 3. **Exploitability** — Is the issue exploitable in a realistic scenario?
@@ -333,6 +363,16 @@ scanner's output.
 ## Analysis criteria
 
 1. **Reachability** — Can untrusted input reach the flagged code path?
+   When a **Context Graph** section is provided below, it is DETERMINISTIC evidence
+   (computed by static data-flow analysis, not guessed) — treat it as primary:
+   • a **tainted + reachable** path is strong evidence the finding is a true positive;
+   • **deadcode / unreachable** (all paths) is strong evidence of a false positive —
+     the flagged code cannot be driven by input;
+   • **no tainted path** on a non-degraded graph means taint was NOT proven — weigh
+     toward false positive unless you can show the reaching flow yourself with tools;
+   • a **sanitizer/guard on every path** means the input is neutralized before the sink.
+   Use your tools to confirm or refute the graph, but do not overturn it without
+   concrete code evidence. (If no Context Graph section appears, judge from the code.)
 2. **Mitigations** — Are there sanitization, validation, or framework protections?
 3. **Exploitability** — Is the issue exploitable in a realistic scenario?
 4. **Context** — Does the surrounding code change the risk assessment?

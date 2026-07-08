@@ -35,28 +35,19 @@ Produce, as structured output:
    file mode, boundary validation, etc.). `summary` is a one-line description; put
    any extra import or config change in `notes`. Set preserves_logic=false ONLY if
    a behavior change is unavoidable, and explain it in `notes`.
-5. **coloring** — classify EVERY PATH in the context graph by its id (node colors are
-   derived automatically from your path verdicts, so focus on paths):
-
-   Path status → color:
-     - vulnerable: tainted, reachable, and protection is absent or insufficient → red
-     - safe: reachable but adequately sanitized/validated for THIS sink → green
-     - node-protected: a node on the path neutralizes exploitability → blue
-     - deadcode: unreachable (honor the graph's reachability hint) → gray
-
-   For `nodes`, ONLY list the node ids that are genuine PROTECTION points (a sufficient
-   sanitizer/validator/guard) with color=blue — leave the rest out; they are colored
-   automatically (red=source/sink on a red path, orange=intermediate, gray=deadcode).
+The graph COLORS are now computed deterministically downstream from the graph's
+own reachability/taint/protection fields and the decided verdict — you do NOT need
+to color anything. Leave `coloring` empty. Put your SEMANTIC judgment (is a present
+sanitizer actually sufficient for this sink? is the source truly attacker-controlled?
+which hop is the real exploit path?) into **rationale** and **explanation** instead,
+where it is actually shown to the developer.
 
 Rules:
 - Use the graph's deterministic hints (reachability, has_sanitizer, has_guard) as ground
-  truth for STRUCTURE. Your job is the SEMANTIC judgment: is a present sanitizer actually
-  sufficient for this sink? is a source truly attacker-controlled? Only mark a path
-  'safe'/'node-protected' when the protection genuinely stops THIS sink's exploit. If the
-  finding is a false positive or not a security vulnerability, do NOT mark paths red.
+  truth for STRUCTURE; reason over them in prose. Do not re-litigate the verdict.
 - You MAY call read_file / grep_code to inspect a validator or a node's callees before deciding.
-- Reference path ids EXACTLY as given in the graph. If no context graph is present, return
-  empty coloring but still produce rationale, business_logic, explanation, remediation.
+- If no context graph is present, still produce rationale, business_logic, explanation,
+  remediation.
 """
 
 
@@ -69,8 +60,8 @@ def build_enrich_message(bundle: EvidenceBundle, verdict: Verdict) -> str:
         f"- **severity**: {verdict.severity}",
         f"- **reason**: {verdict.reason}",
         "\n## Your Task",
-        "Produce rationale, business_logic, explanation, a copy-paste remediation that "
-        "preserves business logic, and color EACH path and node id in the Context Graph "
-        "using the contract above.",
+        "Produce rationale, business_logic, explanation, and a copy-paste remediation "
+        "that preserves business logic. Graph colors are computed automatically — leave "
+        "coloring empty and put path-safety reasoning into rationale/explanation.",
     ]
     return "\n".join(parts)
