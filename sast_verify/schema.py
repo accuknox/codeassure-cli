@@ -61,6 +61,35 @@ class Verdict(BaseModel):
         default=[],
         description="file:line references that support the verdict",
     )
+    source_trust: Literal[
+        "attacker_controlled", "external_service", "operator_config",
+        "internal", "hardcoded", "unknown",
+    ] | None = Field(
+        default=None,
+        description="Trust classification of the data that reaches the flagged sink: "
+        "attacker_controlled (HTTP request, user upload, untrusted CLI/network input), "
+        "external_service (data from another service/API), operator_config (env vars, "
+        "config files an operator controls), internal (values produced by this program), "
+        "hardcoded (constants/literals only), unknown (could not be determined).",
+    )
+    taint_flow_verified: bool | None = Field(
+        default=None,
+        description="True if the source→sink data flow was verified hop-by-hop against the "
+        "actual code (not assumed); false if the flow was checked and does NOT hold; "
+        "null when not applicable (pattern-existence rules) or not traced.",
+    )
+    execution_trace: list[str] = Field(
+        default=[],
+        description="Hop-by-hop execution/data-flow trace that was actually verified, "
+        "each entry 'file:line — what was confirmed there' (entry point, propagation, "
+        "sanitizer, sink). Empty when no tracing was needed.",
+    )
+    attack_scenario: str | None = Field(
+        default=None,
+        description="For exploitable true positives: one concrete, realistic attack scenario "
+        "(who sends what, through which entry point, causing what impact). For "
+        "false positives / non-exploitable findings: null or why no attack is possible.",
+    )
     voting_tally: dict[str, int] | None = Field(
         default=None,
         description="Vote counts per verdict label when voting_rounds > 1",
@@ -105,6 +134,23 @@ class Remediation(BaseModel):
         default="",
         description="Copy-paste-ready corrected code for the affected node(s). "
         "Must preserve the surrounding business logic and function contract.",
+    )
+    file: str | None = Field(
+        default=None,
+        description="File the patch applies to (repo-relative path of the flagged file)",
+    )
+    start_line: int | None = Field(
+        default=None,
+        description="First line (1-indexed, inclusive) of the region code_patch replaces",
+    )
+    end_line: int | None = Field(
+        default=None,
+        description="Last line (inclusive) of the region code_patch replaces",
+    )
+    original_code: str = Field(
+        default="",
+        description="The exact current code of the region being replaced (verbatim), so the "
+        "developer can locate and diff it",
     )
     preserves_logic: bool = Field(
         default=True,

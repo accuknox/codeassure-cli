@@ -78,11 +78,12 @@ class TestReadFile:
         assert result["status"] == "error"
 
 
-# --- read_file: anchor enforcement ---
+# --- read_file: anchor is advisory (codebase containment is the only sandbox) ---
 
 class TestReadFileAnchor:
-    def test_anchor_blocks_outside_scope(self, tmp_path):
-        """read_file rejects paths outside the anchor scope."""
+    def test_anchor_does_not_block_inside_codebase(self, tmp_path):
+        """Anchor scope is advisory: execution-reachability tracing needs repo-wide
+        reads (callers, route registration), so any path INSIDE the codebase works."""
         (tmp_path / "src" / "auth").mkdir(parents=True)
         (tmp_path / "src" / "auth" / "login.py").write_text("ok\n")
         (tmp_path / "docs").mkdir()
@@ -90,8 +91,7 @@ class TestReadFileAnchor:
 
         ctx = _make_context(tmp_path, anchor_root="src")
         result = read_file(ctx, "docs/readme.py")
-        assert result["status"] == "error"
-        assert "analysis scope" in result["error"]
+        assert result["status"] == "success"
 
     def test_anchor_allows_within_scope(self, tmp_path):
         (tmp_path / "src" / "auth").mkdir(parents=True)
@@ -107,19 +107,17 @@ class TestReadFileAnchor:
         result = read_file(ctx, "anywhere.py")
         assert result["status"] == "success"
 
-    def test_shallow_finding_anchored_to_finding_dir(self, tmp_path):
-        """One-level-deep finding (src/login.py) anchors to src/, not repo root."""
-        (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "login.py").write_text("ok\n")
-        (tmp_path / "docs").mkdir()
-        (tmp_path / "docs" / "notes.py").write_text("unrelated\n")
+    def test_codebase_containment_still_enforced_with_anchor(self, tmp_path):
+        """Soft anchor does NOT soften the codebase sandbox."""
+        (tmp_path / "repo" / "src").mkdir(parents=True)
+        (tmp_path / "repo" / "src" / "login.py").write_text("ok\n")
+        (tmp_path / "outside.py").write_text("secret\n")
 
-        # anchor_root="src" simulates what runner computes for src/login.py
-        ctx = _make_context(tmp_path, finding_dir="src", anchor_root="src")
+        ctx = _make_context(tmp_path / "repo", finding_dir="src", anchor_root="src")
         assert read_file(ctx, "src/login.py")["status"] == "success"
-        result = read_file(ctx, "docs/notes.py")
+        result = read_file(ctx, "../outside.py")
         assert result["status"] == "error"
-        assert "analysis scope" in result["error"]
+        assert "outside the codebase" in result["error"]
 
 
 # --- read_file: large file streaming ---
@@ -226,8 +224,9 @@ class TestGrepAnchoring:
         assert any("auth" in p for p in paths)
         assert not any("unrelated" in p for p in paths)
 
-    def test_explicit_path_blocked_by_anchor(self, tmp_path):
-        """grep_code(path=...) rejects paths outside anchor scope."""
+    def test_explicit_path_outside_anchor_allowed(self, tmp_path):
+        """Anchor is advisory: grep_code(path=...) may search anywhere inside the
+        codebase — reachability questions (callers, registrations) are repo-wide."""
         (tmp_path / "src" / "auth").mkdir(parents=True)
         (tmp_path / "src" / "auth" / "login.py").write_text("target\n")
         (tmp_path / "docs").mkdir()
@@ -235,8 +234,8 @@ class TestGrepAnchoring:
 
         ctx = _make_context(tmp_path, finding_dir="src/auth", anchor_root="src")
         result = grep_code(ctx, "target", path="docs")
-        assert result["status"] == "error"
-        assert "analysis scope" in result["error"]
+        assert result["status"] == "success"
+        assert any("docs" in m["path"] for m in result["matches"])
 
     def test_explicit_path_within_anchor(self, tmp_path):
         """grep_code(path=...) allows paths within anchor scope."""
@@ -262,6 +261,78 @@ class TestGrepAnchoring:
         result = grep_code(ctx, "x", path="../../etc")
         assert result["status"] == "error"
         assert "outside" in result["error"]
+
+
+# --- trace_callers: execution-reachability tool ---
+
+class TestTraceCallers:
+    def _repo(self, tmp_path):
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "creds.go").write_text(
+            "package pkg\n"
+            "\n"
+            "func CreateServerCreds() int {\n"
+            "\treturn 1\n"
+            "}\n"
+        )
+        (tmp_path / "main.go").write_text(
+            "package main\n"
+            "\n"
+            "func main() {\n"
+            "\tx := CreateServerCreds()\n"
+            "\t_ = x\n"
+            "}\n"
+        )
+        return tmp_path
+
+    def test_finds_call_sites_repo_wide_and_separates_definition(self, tmp_path):
+        from sast_verify.agents.tools import trace_callers
+
+        repo = self._repo(tmp_path)
+        # finding anchored deep in pkg/ — caller in main.go must still be found
+        ctx = _make_context(repo, finding_dir="pkg", anchor_root="pkg")
+        result = trace_callers(ctx, "CreateServerCreds")
+        assert result["status"] == "success"
+        call_paths = [c["path"] for c in result["call_sites"]]
+        assert "main.go" in call_paths
+        def_paths = [d["path"] for d in result["definitions"]]
+        assert "pkg/creds.go" in def_paths
+
+    def test_no_callers_returns_empty_call_sites(self, tmp_path):
+        from sast_verify.agents.tools import trace_callers
+
+        (tmp_path / "lone.go").write_text(
+            "package main\n\nfunc Unused() {}\n"
+        )
+        ctx = _make_context(tmp_path)
+        result = trace_callers(ctx, "Unused")
+        assert result["status"] == "success"
+        assert result["call_sites"] == []
+
+    def test_rejects_non_identifier(self, tmp_path):
+        from sast_verify.agents.tools import trace_callers
+
+        ctx = _make_context(tmp_path)
+        assert trace_callers(ctx, "a(); rm -rf /")["status"] == "error"
+        assert trace_callers(ctx, ".*")["status"] == "error"
+
+    def test_accepts_trailing_parens(self, tmp_path):
+        from sast_verify.agents.tools import trace_callers
+
+        (tmp_path / "a.py").write_text("def f():\n    pass\n\nf()\n")
+        ctx = _make_context(tmp_path)
+        result = trace_callers(ctx, "f()")
+        assert result["status"] == "success"
+        assert len(result["call_sites"]) == 1
+        assert len(result["definitions"]) == 1
+
+    def test_tracks_access_for_evidence_validation(self, tmp_path):
+        from sast_verify.agents.tools import trace_callers
+
+        repo = self._repo(tmp_path)
+        ctx = _make_context(repo)
+        trace_callers(ctx, "CreateServerCreds")
+        assert "main.go" in ctx.deps.accessed_paths
 
 
 # --- tool access tracking ---

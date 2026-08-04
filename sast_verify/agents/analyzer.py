@@ -17,7 +17,7 @@ from ..prompts.analyzer import (
 )
 from ..schema import GroupVerdicts, Verdict
 from .deps import AnalyzerDeps
-from .tools import grep_code, read_file
+from .tools import grep_code, read_file, trace_callers
 
 # PromptedOutput (text-based JSON parsing) instead of ToolOutput so reasoning models
 # (Qwen3.6 with thinking) can emit JSON in their text response without colliding with
@@ -40,7 +40,7 @@ def build_analyzer() -> Agent[AnalyzerDeps, Verdict]:
             deps_type=AnalyzerDeps,
             output_type=PromptedOutput(Verdict),
             instructions=ANALYZER_INSTRUCTION,
-            tools=[read_file, grep_code],
+            tools=[read_file, grep_code, trace_callers],
             output_retries=_OUTPUT_RETRIES,
         )
     return Agent(
@@ -76,7 +76,7 @@ def build_group_analyzer() -> Agent[AnalyzerDeps, GroupVerdicts]:
             deps_type=AnalyzerDeps,
             output_type=PromptedOutput(GroupVerdicts),
             instructions=GROUP_ANALYZER_INSTRUCTION,
-            tools=[read_file, grep_code],
+            tools=[read_file, grep_code, trace_callers],
             output_retries=_OUTPUT_RETRIES,
         )
     return Agent(

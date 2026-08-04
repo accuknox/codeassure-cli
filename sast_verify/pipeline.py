@@ -27,10 +27,11 @@ def _no_anchor_verdict() -> Verdict:
 
 
 def _is_deadcode(finding) -> bool:
-    """True if the deterministic context graph proves the sink is unreachable.
+    """True if the deterministic context graph reports every path as unreachable.
 
-    Every path is dead / has no caller from any entry point → the flagged pattern
-    cannot be triggered. Set by context-graph-cli only for reliable front-ends.
+    Raw predicate: every path is dead / has no caller from any entry point. Whether
+    that is *decisive* for the verdict is a separate policy question — see
+    _deadcode_is_decisive.
     """
     cg = getattr(finding, "context_graph", None)
     if not cg or not isinstance(cg, dict):
@@ -39,15 +40,57 @@ def _is_deadcode(finding) -> bool:
     return bool(paths) and all(p.get("reachability") == "deadcode" for p in paths)
 
 
-def _deadcode_verdict() -> Verdict:
+def _deadcode_sink_evidence(finding) -> list[str]:
+    cg = getattr(finding, "context_graph", None)
+    if isinstance(cg, dict):
+        sink = cg.get("sink") or {}
+        if sink.get("file") and sink.get("line") is not None:
+            return [f"{sink['file']}:{sink['line']}"]
+    return []
+
+
+def _deadcode_decision(finding) -> Verdict | None:
+    """Deterministic verdict for an all-deadcode finding, honoring the context graph as
+    authoritative — but ONLY when the graph is non-degraded.
+
+    Returns None to defer to the LLM: no graph, not all-deadcode, or a *degraded* graph
+    (which is a hint, not a ruling — the LLM decides, with the graph as strong evidence).
+
+    On a non-degraded, all-deadcode graph:
+      - taint / injection rule  → false_positive (the unreachable sink cannot be driven
+        by input, so the flagged flow cannot occur);
+      - pattern-existence rule  → true_positive + is_security_vulnerability=false (the
+        flagged construct really is present — a real occurrence, so not a false positive —
+        it just isn't reachable, so it isn't exploitable).
+    """
+    if not _is_deadcode(finding):
+        return None
+    cg = getattr(finding, "context_graph", None) or {}
+    if (cg.get("stats") or {}).get("degraded"):
+        return None  # degraded graph is a hint, not a ruling → let the LLM decide
+    from .prompts.rule_policies import is_taint_class
+
+    ev = _deadcode_sink_evidence(finding)
+    if is_taint_class(finding.check_id, finding):
+        return Verdict(
+            verdict="false_positive",
+            is_security_vulnerability=False,
+            severity="low",
+            confidence="high",
+            reason="Deterministic reachability analysis (non-degraded context graph): the "
+            "flagged taint sink has no data-flow or caller path from any entry point, so "
+            "the injection cannot be triggered.",
+            evidence_locations=ev,
+        )
     return Verdict(
-        verdict="false_positive",
+        verdict="true_positive",
         is_security_vulnerability=False,
         severity="low",
         confidence="high",
-        reason="Deterministic reachability analysis: the flagged sink has no data-flow "
-        "or caller path from any entry point (dead / unreachable code), so the pattern "
-        "cannot be triggered.",
+        reason="The flagged construct is present, but a non-degraded context graph proves "
+        "every path to it is dead / unreachable — so the pattern is a real occurrence "
+        "(true_positive) that cannot be triggered by input (not a security vulnerability).",
+        evidence_locations=ev,
     )
 
 
@@ -80,10 +123,15 @@ def _load_checkpoint(output_path: Path) -> dict[int, Verdict]:
 
 
 def _save_checkpoint(output_path: Path, verdicts: dict[int, Verdict]) -> None:
-    """Save verdicts to checkpoint file."""
+    """Save verdicts to checkpoint file.
+
+    Full model dump (minus unset/None noise) so newer fields — source_trust,
+    execution_trace, attack_scenario, taint_flow_verified — survive a resume.
+    """
     cp = _checkpoint_path(output_path)
     data = {
-        str(idx): {
+        str(idx): v.model_dump(exclude_none=True, exclude_defaults=True)
+        | {  # always keep the decision core, even at default values
             "verdict": v.verdict,
             "is_security_vulnerability": v.is_security_vulnerability,
             "severity": v.severity,
@@ -215,8 +263,13 @@ def _write_output(
     findings: list | None = None,
     codebase: Path | None = None,
     enrichments: dict | None = None,
+    enrich_fallback=None,
 ) -> None:
-    """Merge verdicts into original findings JSON and write output."""
+    """Merge verdicts into original findings JSON and write output.
+
+    enrich_fallback(index, verdict) -> Enrichment | None fills enrichment keys
+    for findings the LLM pass missed, keeping the output schema complete.
+    """
     from .graph import build_finding_graph
     from .preprocess import compact_finding
 
@@ -231,6 +284,15 @@ def _write_output(
             "reason": verdict.reason,
             "evidence": [{"location": loc} for loc in verdict.evidence_locations],
         }
+        # Execution-reality fields from the analyzer's graph-guided trace.
+        if verdict.source_trust is not None:
+            verification["source_trust"] = verdict.source_trust
+        if verdict.taint_flow_verified is not None:
+            verification["taint_flow_verified"] = verdict.taint_flow_verified
+        if verdict.execution_trace:
+            verification["execution_trace"] = verdict.execution_trace
+        if verdict.attack_scenario:
+            verification["attack_scenario"] = verdict.attack_scenario
         if verdict.validator_reason is not None or verdict.validator_verdict_agrees is not None:
             verification["validator"] = {
                 "verdict_agrees": verdict.validator_verdict_agrees,
@@ -238,8 +300,12 @@ def _write_output(
                 "reason": verdict.validator_reason,
             }
 
-        # Enrichment (rationale, business logic, remediation) + graph coloring.
+        # Enrichment (rationale, business logic, remediation). When the pass is
+        # enabled these keys are guaranteed: a missing entry (crash, resumed run)
+        # degrades to the deterministic fallback rather than absent keys.
         enrichment = enrichments.get(i)
+        if enrichment is None and enrich_fallback is not None:
+            enrichment = enrich_fallback(i, verdict)
         if enrichment is not None:
             verification["rationale"] = enrichment.rationale
             verification["business_logic"] = enrichment.business_logic
@@ -316,15 +382,20 @@ def run(
             if (b.finding.impact or "NOT_AVAILABLE").upper() in severities
         ]
 
-    # Deterministic shortcut: gray out provably-dead sinks with no LLM call.
-    deadcode = [(i, b) for i, b in to_analyze if _is_deadcode(b.finding)]
+    # Deterministic context-graph shortcut: when a NON-DEGRADED graph proves every path
+    # to the sink is dead, honor it without an LLM call — false_positive for taint/injection
+    # rules, true_positive + is_security=false for pattern-existence rules (see
+    # _deadcode_decision). Degraded graphs and partially-reachable graphs fall through to
+    # the LLM, which treats the graph as strong (but not final) evidence.
+    deadcode = [(i, b, _deadcode_decision(b.finding)) for i, b in to_analyze]
+    deadcode = [(i, b, v) for i, b, v in deadcode if v is not None]
     if deadcode:
-        for i, _ in deadcode:
-            verdicts[i] = _deadcode_verdict()
-        dead_idx = {i for i, _ in deadcode}
+        for i, _b, v in deadcode:
+            verdicts[i] = v
+        dead_idx = {i for i, _b, _v in deadcode}
         to_analyze = [(i, b) for i, b in to_analyze if i not in dead_idx]
-        print(f"[deadcode] {len(deadcode)} finding(s) resolved as unreachable "
-              f"(deterministic, no LLM); {len(to_analyze)} remain", flush=True)
+        print(f"[deadcode] {len(deadcode)} finding(s) resolved deterministically from a "
+              f"non-degraded context graph (no LLM); {len(to_analyze)} remain", flush=True)
 
     skipped = len(bundles) - len(to_analyze) - len(deadcode)
     print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI", flush=True)
@@ -417,22 +488,38 @@ def run(
             flush=True,
         )
 
-    # Enrichment + graph-coloring pass — one extra LLM call per decided finding.
+    # Enrichment pass — one extra LLM call per finding. EVERY finding gets an
+    # enrichment (rationale + business context + paste-ready remediation):
+    # deadcode-resolved and uncertain findings included — a developer still needs
+    # to know what the code does and how to harden it. LLM failures degrade to a
+    # deterministic fallback enrichment, so the output schema is always complete.
     enrichments: dict = {}
     if cfg.enrichment:
-        dead_idx = {i for i, _ in deadcode}
-        enrich_items = [
-            (i, b, verdicts[i])
-            for i, b in enumerate(bundles)
-            if i not in dead_idx and verdicts[i].verdict in ("true_positive", "false_positive")
-        ]
+        enrich_items = [(i, b, verdicts[i]) for i, b in enumerate(bundles)]
         if enrich_items:
             from .agents.enrich import enrich_all
             print(f"[enrich] enriching {len(enrich_items)} finding(s)…", flush=True)
             enrichments = asyncio.run(enrich_all(enrich_items, codebase, concurrency))
+            fallbacks = sum(
+                1 for e in enrichments.values()
+                if "enrichment unavailable" in (e.remediation.notes or "").lower()
+            )
+            if fallbacks:
+                print(f"[enrich] ⚠ {fallbacks} finding(s) got deterministic fallback "
+                      f"enrichment (LLM unavailable)", flush=True)
+
+    enrich_fallback = None
+    if cfg.enrichment:
+        from .agents.enrich import fallback_enrichment
+
+        def enrich_fallback(i: int, verdict):
+            if 0 <= i < len(bundles):
+                return fallback_enrichment(bundles[i], verdict, "not produced in this run")
+            return None
 
     _write_output(findings_path, output_path, verdicts, findings=findings,
-                  codebase=codebase, enrichments=enrichments)
+                  codebase=codebase, enrichments=enrichments,
+                  enrich_fallback=enrich_fallback)
 
     # Clean up checkpoint on successful completion
     cp = _checkpoint_path(output_path)

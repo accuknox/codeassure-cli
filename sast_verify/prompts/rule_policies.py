@@ -224,3 +224,51 @@ def get_constraints(check_id: str) -> list[str]:
     if policy and "constraints" in policy:
         return policy["constraints"]
     return GENERIC_CONSTRAINTS
+
+
+# check_id fragments that mark a data-flow / taint / injection rule. For these,
+# a real source→sink flow is *constitutive of the pattern*, so reachability/taint
+# legitimately bears on the VERDICT. For every other rule (the pattern-existence
+# majority) the verdict is a pure at-site presence check and reachability must
+# not decide it — it may only lower is_security_vulnerability / severity.
+TAINT_CHECK_ID_SUBSTRINGS = (
+    "sql-injection", "sqli", "xss", "cross-site-scripting", "ssrf",
+    "path-traversal", "directory-traversal", "command-injection",
+    "os-command", "code-injection", "rce", "remote-code-execution",
+    "tainted", "taint", "injection", "deserial", "unpickle", "insecure-load",
+    "xxe", "xml-external", "open-redirect", "ldap-injection", "nosql",
+    "template-injection", "ssti", "log-injection", "header-injection",
+)
+
+
+def is_taint_class(check_id: str, finding=None) -> bool:
+    """True when the rule's verdict is a data-flow question (reachability decides it).
+
+    Every family in RULE_POLICIES is pattern-existence, so a known check_id is
+    never taint-class. Unknown check_ids are classified by check_id fragment and
+    by whether the scanner attached taint metadata / a tainted context-graph path.
+    """
+    if get_rule_short_name(check_id) in RULE_POLICIES:
+        return False
+    cid = check_id.lower()
+    if any(s in cid for s in TAINT_CHECK_ID_SUBSTRINGS):
+        return True
+    if finding is not None:
+        if getattr(finding, "taint_source", None) or getattr(finding, "taint_sink", None):
+            return True
+        cg = getattr(finding, "context_graph", None)
+        if isinstance(cg, dict) and any(p.get("tainted") for p in (cg.get("paths") or [])):
+            return True
+    return False
+
+
+def rule_kind_of(check_id: str, finding=None) -> str:
+    """Best-effort rule_kind label for prompt grounding.
+
+    Returns the known RULE_POLICIES kind, else 'taint_class' for data-flow rules,
+    else 'pattern_existence'.
+    """
+    policy = lookup_policy(check_id)
+    if policy:
+        return policy.get("rule_kind", "pattern_existence")
+    return "taint_class" if is_taint_class(check_id, finding) else "pattern_existence"

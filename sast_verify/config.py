@@ -78,6 +78,8 @@ class Config(BaseModel):
     grep_max_file_kb: int = Field(default=512, ge=1, description="Skip files larger than this in grep (KB)")
     grep_max_scan_mb: int = Field(default=5, ge=1, description="Stop grep scanning after this many MB read")
     request_limit: int = Field(default=200, ge=1, description="Max requests per agent.run() call (reasoning models need more)")
+    retries: int = Field(default=4, ge=0, description="Retries per LLM call on transient errors (rate limits, 5xx, timeouts, connection drops) with exponential backoff")
+    evaluator: bool = Field(default=False, description="Run a second evaluator LLM pass on each verdict (consistency check + severity review). Doubles LLM calls; the structured analyzer already assigns severity, so keep off unless using a weak local model.")
     voting_rounds: int = Field(default=1, ge=1, description="Run each finding N times and take majority verdict (3 recommended for non-deterministic local models)")
     max_tokens: int | None = Field(default=4096, description="Max completion tokens per LLM call. Set to null for uncapped.")
     finding_policy: FindingPolicy = Field(default_factory=FindingPolicy, description="Controls what counts as true_positive")

@@ -30,12 +30,12 @@ def _is_contained(path: Path, root: Path) -> bool:
 
 
 def _check_anchor(filepath: Path, root: Path, ctx: RunContext[AnalyzerDeps]) -> bool:
-    """Check if filepath is within the analysis anchor scope."""
-    anchor = ctx.deps.anchor_root
-    if not anchor:
-        return True  # no anchor → full codebase access
-    anchor_path = (root / anchor).resolve()
-    return _is_contained(filepath, anchor_path)
+    """Anchor scope is ADVISORY, not a sandbox. Execution-reachability questions
+    (who calls this entry point? where is this route registered?) are inherently
+    repo-wide, so tools may roam anywhere INSIDE the codebase; the prompt keeps
+    the model focused on the flagged file first. The only hard boundary is
+    codebase containment, enforced separately by _is_contained."""
+    return True
 
 
 def _track_access(ctx: RunContext[AnalyzerDeps], path: str, start_line: int = 0, end_line: int = 0) -> None:
@@ -65,8 +65,6 @@ def read_file(
 
     if not _is_contained(filepath, root):
         return {"status": "error", "error": "Path is outside the codebase"}
-    if not _check_anchor(filepath, root, ctx):
-        return {"status": "error", "error": "Path is outside the analysis scope for this finding"}
     if not filepath.is_file():
         return {"status": "error", "error": f"File not found: {path}"}
 
@@ -148,8 +146,6 @@ def grep_code(
 
     if not _is_contained(search_root, root):
         return {"status": "error", "error": "Path is outside the codebase"}
-    if not _check_anchor(search_root, root, ctx):
-        return {"status": "error", "error": "Search path is outside the analysis scope for this finding"}
 
     try:
         compiled = re.compile(pattern)
@@ -226,3 +222,120 @@ def grep_code(
                     return {"status": "success", "matches": matches, "truncated": True}
 
     return {"status": "success", "matches": matches, "truncated": False}
+
+
+MAX_CALLER_MATCHES = 25
+
+_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Definition-shaped lines (per common languages). A hit on one of these is the
+# symbol's own definition, not a call site — classified, not dropped, so the
+# model still learns where the function lives.
+_DEF_LINE_PATTERNS = (
+    r"^\s*(async\s+)?def\s+{s}\s*\(",                       # python
+    r"^\s*func\s+(\([^)]*\)\s*)?{s}\s*\(",                  # go (incl. methods)
+    r"^\s*(export\s+)?(default\s+)?(async\s+)?function\s*\*?\s*{s}\s*\(",  # js/ts
+    r"^\s*(pub\s+)?(async\s+)?fn\s+{s}\s*\(",               # rust
+    r"^\s*(public|private|protected|internal|static|final|override|open|suspend)[\w\s<>\[\],]*\b{s}\s*\([^;]*$",  # java/c#/kotlin
+    r"^\s*{s}\s*[:=]\s*(async\s*)?(\([^)]*\)|function)\s*(=>|\{{)?",  # js arrow/expr defs
+)
+
+
+def trace_callers(
+    ctx: RunContext[AnalyzerDeps],
+    function_name: str,
+    path: str = "",
+) -> dict:
+    """Find call sites of a function across the whole codebase — use this to verify
+    execution reachability: who invokes an entry point, where a handler/route is
+    registered, whether a source function is ever actually called.
+
+    Args:
+        function_name: Exact function/method name (identifier only, no parentheses).
+        path: Optional subdirectory to narrow the search (default: entire codebase).
+    """
+    name = function_name.strip().removesuffix("()").strip()
+    if not _SYMBOL_RE.match(name):
+        return {"status": "error",
+                "error": "function_name must be a plain identifier (letters, digits, underscore)"}
+
+    root = _codebase(ctx)
+    search_root = (root / path).resolve() if path else root
+    if not _is_contained(search_root, root):
+        return {"status": "error", "error": "Path is outside the codebase"}
+
+    call_re = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"\s*\(")
+    def_res = [re.compile(p.format(s=re.escape(name))) for p in _DEF_LINE_PATTERNS]
+
+    _SKIP_DIRS = {".venv", "venv", "node_modules", ".git", "__pycache__", ".tox",
+                  ".mypy_cache", "dist", "build"}
+
+    def _iter_files(r: Path):
+        if r.is_file():
+            yield r
+            return
+        try:
+            children = sorted(r.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if child.is_dir():
+                if child.name in _SKIP_DIRS:
+                    continue
+                yield from _iter_files(child)
+            else:
+                yield child
+
+    max_file_size = ctx.deps.grep_max_file_size
+    max_bytes = ctx.deps.grep_max_bytes
+
+    calls: list[dict] = []
+    definitions: list[dict] = []
+    bytes_scanned = 0
+    truncated = False
+    for f in _iter_files(search_root):
+        if not f.is_file() or f.suffix in (".pyc", ".so", ".bin", ".o", ".whl", ".jar",
+                                           ".min.js", ".map", ".lock"):
+            continue
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
+        if size > max_file_size:
+            continue
+        if bytes_scanned + size > max_bytes:
+            truncated = True
+            break
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, PermissionError, OSError):
+            continue
+        bytes_scanned += size
+        if name not in text:  # cheap pre-filter before line loop
+            continue
+        all_lines = text.splitlines()
+        rel_path = str(f.relative_to(root))
+        for i, line in enumerate(all_lines):
+            if not call_re.search(line):
+                continue
+            is_def = any(dr.search(line) for dr in def_res)
+            ctx_start = max(0, i - 2)
+            ctx_end = min(len(all_lines), i + 3)
+            numbered = "\n".join(
+                f"{ctx_start + j + 1}: {all_lines[ctx_start + j]}"
+                for j in range(ctx_end - ctx_start)
+            )
+            entry = {"path": rel_path, "line": i + 1, "content": numbered}
+            _track_access(ctx, rel_path, ctx_start + 1, ctx_end)
+            if is_def:
+                definitions.append(entry)
+            else:
+                calls.append(entry)
+            if len(calls) >= MAX_CALLER_MATCHES:
+                return {"status": "success", "function": name, "call_sites": calls,
+                        "definitions": definitions, "truncated": True}
+
+    return {"status": "success", "function": name, "call_sites": calls,
+            "definitions": definitions, "truncated": truncated,
+            **({"note": "Scan budget exhausted before covering the whole codebase"}
+               if truncated else {})}
