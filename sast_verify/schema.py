@@ -157,6 +157,12 @@ class Remediation(BaseModel):
         description="True if applying the patch does not change intended behaviour",
     )
     notes: str = Field(default="", description="Caveats, follow-ups, or config changes needed")
+    anchor_verified: bool = Field(
+        default=False,
+        description="True when original_code was verified byte-exact against file content at "
+        "start_line..end_line (set deterministically after enrichment — replacing that region "
+        "with code_patch is then a safe mechanical edit)",
+    )
 
 
 class PathColoring(BaseModel):

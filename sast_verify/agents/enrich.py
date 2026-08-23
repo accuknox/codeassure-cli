@@ -18,6 +18,7 @@ from ..config import get_config
 from ..prompts.enrich import ENRICH_INSTRUCTION, build_enrich_message
 from ..schema import Enrichment, EvidenceBundle, Remediation, Verdict
 from .deps import AnalyzerDeps
+from .patch_anchor import anchor_remediation
 from .runner import _build_deps, _build_run_kwargs, _error_detail, _run_with_retry
 from .tools import grep_code, read_file, trace_callers
 
@@ -91,13 +92,23 @@ async def _enrich_one(
                 _run_with_retry(enricher, message, label=label, **run_kwargs),
                 timeout=timeout,
             )
-            return index, result.output
+            enrichment = result.output
         except asyncio.TimeoutError:
             log.warning("enrich: timed out for %s:%s", bundle.finding.path, bundle.finding.line)
-            return index, fallback_enrichment(bundle, verdict, f"timed out after {timeout:.0f}s")
+            enrichment = fallback_enrichment(bundle, verdict, f"timed out after {timeout:.0f}s")
         except Exception as exc:
             log.warning("enrich: failed for %s:%s: %s", bundle.finding.path, bundle.finding.line, exc)
-            return index, fallback_enrichment(bundle, verdict, _error_detail(exc))
+            enrichment = fallback_enrichment(bundle, verdict, _error_detail(exc))
+        # Deterministic paste-target guarantee: original_code must be the real
+        # file content at start..end (or the target is re-anchored / flagged).
+        try:
+            enrichment.remediation = anchor_remediation(
+                enrichment.remediation, codebase, bundle.finding,
+            )
+        except Exception as exc:  # never let anchoring sink an enrichment
+            log.warning("enrich: paste-target anchoring failed for %s:%s: %s",
+                        bundle.finding.path, bundle.finding.line, exc)
+        return index, enrichment
 
 
 async def enrich_all(

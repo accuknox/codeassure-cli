@@ -307,6 +307,18 @@ def _write_output(
         if enrichment is None and enrich_fallback is not None:
             enrichment = enrich_fallback(i, verdict)
         if enrichment is not None:
+            # Paste-target invariant at the LAST exit: original_code must equal
+            # the file content at start..end (idempotent when already anchored
+            # by the enrichment pass; covers the write-time fallback path too).
+            if codebase is not None:
+                try:
+                    from .agents.patch_anchor import anchor_remediation
+                    fnd = findings[i] if findings else compact_finding(result)
+                    enrichment.remediation = anchor_remediation(
+                        enrichment.remediation, Path(codebase), fnd,
+                    )
+                except Exception:
+                    pass  # anchoring is best-effort at this layer
             verification["rationale"] = enrichment.rationale
             verification["business_logic"] = enrichment.business_logic
             verification["explanation"] = enrichment.explanation
