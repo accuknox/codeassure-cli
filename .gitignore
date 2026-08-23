@@ -22,3 +22,6 @@ llms-full.txt
 
 build/
 .gstack/
+
+# Joern shell importCpg scratch copies
+workspace/
