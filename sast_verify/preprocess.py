@@ -47,8 +47,44 @@ def compact_finding(item: dict) -> Finding:
     return Finding(**fields)
 
 
-def preprocess_data(data: dict) -> list[Finding]:
-    return [compact_finding(r) for r in data.get("results", [])]
+def normalize_finding_path(path: str, codebase: Path) -> str:
+    """Rewrite a scanner path to codebase-relative POSIX form.
+
+    Scanners invoked with an absolute target emit absolute paths; retrieval,
+    the agent tools, evidence validation, and remediation paste targets all
+    assume codebase-relative. An absolute path resolving under the codebase is
+    rewritten; one that does not is matched by suffix against the codebase
+    directory name; anything else is returned unchanged.
+    """
+    if not path:
+        return path
+    p = Path(path)
+    if not p.is_absolute():
+        rel = str(p).replace("\\", "/")
+        while rel.startswith("./"):
+            rel = rel[2:]
+        return rel or path
+    try:
+        return p.resolve().relative_to(Path(codebase).resolve()).as_posix()
+    except (ValueError, OSError):
+        pass
+    name = Path(codebase).resolve().name
+    parts = p.parts
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == name:
+            rel = Path(*parts[i + 1:]).as_posix()
+            if rel and (Path(codebase) / rel).is_file():
+                return rel
+            break
+    return path
+
+
+def preprocess_data(data: dict, codebase: Path | None = None) -> list[Finding]:
+    findings = [compact_finding(r) for r in data.get("results", [])]
+    if codebase is not None:
+        for f in findings:
+            f.path = normalize_finding_path(f.path, codebase)
+    return findings
 
 
 def preprocess(results_path: Path) -> list[Finding]:

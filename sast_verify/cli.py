@@ -1,10 +1,36 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 
+def _load_dotenv() -> None:
+    """Load ``.env`` from the working directory into the environment.
+
+    ``.env`` is the documented home for API keys (see .env.example) and the
+    ``"api_key": "$VAR"`` config syntax resolves against the environment, so
+    the CLI must actually read it. Real environment variables win
+    (``setdefault``); no third-party dependency.
+    """
+    env = Path.cwd() / ".env"
+    if not env.is_file():
+        return
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+
+
 def main() -> None:
+    _load_dotenv()
     parser = argparse.ArgumentParser(
         prog="codeassure",
         description="AI-powered SAST finding verification",

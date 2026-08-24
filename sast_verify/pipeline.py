@@ -371,7 +371,7 @@ def run(
     _ref = raw_findings_json.get("ref") or ""
     repo_id_from_file = f"{_repo_url}/{_ref}".strip("/") if _repo_url else ""
 
-    findings = preprocess_data(raw_findings_json)
+    findings = preprocess_data(raw_findings_json, codebase=codebase)
     t0 = time.perf_counter()
     if cfg.findings_analysis:
         bundles = [EvidenceBundle(finding=f, evidence=[]) for f in findings]
