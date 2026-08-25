@@ -46,7 +46,7 @@ export function FindingsList({
   }, [data]);
 
   return (
-    <main className="max-w-5xl mx-auto px-6 py-8">
+    <main className="w-full px-6 py-8">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full" style={{ background: "#1578F7" }} />

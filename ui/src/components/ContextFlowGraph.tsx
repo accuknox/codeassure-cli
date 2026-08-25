@@ -165,7 +165,7 @@ export function ContextFlowGraph({ graph }: { graph: ContextGraph }) {
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5 }}
-      className="w-full h-[440px] rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden"
+      className="w-full h-[calc(100vh-14rem)] min-h-[500px] rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden"
     >
       <div className="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
         <div className="flex items-center gap-1">

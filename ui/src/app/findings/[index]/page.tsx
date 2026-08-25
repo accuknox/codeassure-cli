@@ -6,6 +6,8 @@ import { motion } from "motion/react";
 import { FindingGraph } from "@/components/FindingGraph";
 import { ContextFlowGraph } from "@/components/ContextFlowGraph";
 import { VerdictBadge, ConfidenceBadge, SecurityBadge, SeverityBadge } from "@/components/VerdictBadge";
+import { Markdown } from "@/components/Markdown";
+import { CodeBlock } from "@/components/CodeBlock";
 import { resolveSeverity } from "@/lib/severity";
 import type { Finding } from "@/lib/types";
 
@@ -44,7 +46,7 @@ export default function FindingDetail({ params }: { params: Promise<{ index: str
 
   if (!finding) {
     return (
-      <main className="max-w-5xl mx-auto px-6 py-10">
+      <main className="w-full px-6 py-10">
         <p className="text-zinc-500">
           No data loaded.{" "}
           <button onClick={() => router.push("/")} className="text-zinc-300 underline">
@@ -115,21 +117,21 @@ export default function FindingDetail({ params }: { params: Promise<{ index: str
         {tab === "Overview" && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Card title="Verdict Reason">
-              <p className="text-sm text-zinc-300 leading-relaxed">{v.reason}</p>
+              <Markdown>{v.reason}</Markdown>
               <div className="mt-3"><ConfidenceBadge confidence={v.confidence} /></div>
             </Card>
             {v.rationale && (
               <Card title="Rationale">
-                <p className="text-sm text-zinc-300 leading-relaxed">{v.rationale}</p>
+                <Markdown>{v.rationale}</Markdown>
               </Card>
             )}
             {v.business_logic && (
               <Card title="Business Logic" className="md:col-span-2">
-                <p className="text-sm text-zinc-300 leading-relaxed">{v.business_logic}</p>
+                <Markdown>{v.business_logic}</Markdown>
               </Card>
             )}
             <Card title="Scanner Claim">
-              <p className="text-sm text-zinc-300 leading-relaxed">{finding.extra.message}</p>
+              <Markdown>{finding.extra.message}</Markdown>
               {finding.extra.severity && (
                 <span className="inline-block mt-2 text-xs text-zinc-500 px-2 py-0.5 border border-zinc-800 rounded">
                   {finding.extra.severity}
@@ -137,10 +139,12 @@ export default function FindingDetail({ params }: { params: Promise<{ index: str
               )}
             </Card>
             {finding.extra.lines && (
-              <Card title="Flagged Code">
-                <pre className="text-xs font-mono text-zinc-300 bg-zinc-900 p-3 rounded-lg overflow-x-auto">
-                  {finding.extra.lines}
-                </pre>
+              <Card title="Flagged Code" className="md:col-span-2">
+                <CodeBlock
+                  code={finding.extra.lines}
+                  startLine={finding.start.line}
+                  endLine={finding.end.line}
+                />
               </Card>
             )}
           </div>
@@ -149,9 +153,7 @@ export default function FindingDetail({ params }: { params: Promise<{ index: str
         {tab === "Risk Analysis" && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Card title="Explanation" className="md:col-span-2">
-              <p className="text-sm text-zinc-300 leading-relaxed">
-                {v.explanation || v.reason}
-              </p>
+              <Markdown>{v.explanation || v.reason}</Markdown>
             </Card>
             {cg && (
               <Card title="Data Flow (deterministic)" className="md:col-span-2">
@@ -230,7 +232,7 @@ export default function FindingDetail({ params }: { params: Promise<{ index: str
             {rem ? (
               <>
                 <Card title="Fix">
-                  <p className="text-sm text-zinc-300 leading-relaxed">{rem.summary}</p>
+                  <Markdown>{rem.summary}</Markdown>
                   {rem.preserves_logic === false && (
                     <p className="mt-2 text-xs text-amber-400">
                       ⚠ This change may alter behavior — review before applying.
@@ -246,7 +248,7 @@ export default function FindingDetail({ params }: { params: Promise<{ index: str
                 )}
                 {rem.notes && (
                   <Card title="Notes">
-                    <p className="text-sm text-zinc-400 leading-relaxed">{rem.notes}</p>
+                    <Markdown>{rem.notes}</Markdown>
                   </Card>
                 )}
               </>
