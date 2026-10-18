@@ -58,6 +58,13 @@ _NON_SECURITY_RULE_SUBSTRINGS = (
     "missing-image-version",
     "multiple-entrypoint",
     "dockerfile-source-not-pinned",
+    # Correctness lints and AI-usage inventory: a real hit is still not an attack.
+    "missing-template-string-indicator",
+    "useless-assignment",
+    "useless-ternary",
+    "html-in-template-string",
+    "detect-generic-ai",
+    "detect-openai",
 )
 
 
@@ -267,6 +274,35 @@ def _build_run_kwargs(
     return run_kwargs, formatter_kwargs
 
 
+_NON_ANSWER = re.compile(r"(?i)^(i will|i'll|i need to|i should|let me|let's|first,? i|now,? i|okay|ok,)\b")
+_GARBLE_BLOCK_ELEMENTS = re.compile(r"[\u2580-\u259f]")  # never appears in a legitimate explanation
+_GARBLE_FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]")
+
+
+def _is_garbled(verdict: Verdict) -> bool:
+    """True when a verdict's free text is unusable: degenerate output, a non-answer, or not English.
+
+    Small models sometimes derail mid-sentence (block characters, unrelated words, a switch to
+    another script). Such a reason cannot be trusted, and neither can the verdict it argues for.
+    """
+    text = " ".join([verdict.reason or "", *verdict.execution_trace])
+    if not text.strip():
+        return False
+    # a plan or a stub is not an explanation ("I will read the surrounding files before deciding.")
+    reason = (verdict.reason or "").strip()
+    if len(reason) < 25 or _NON_ANSWER.match(reason):
+        return True
+    letters = sum(ch.isalpha() for ch in text) or 1
+    if _GARBLE_BLOCK_ELEMENTS.search(text):
+        return True
+    # a short quoted foreign string is fine; an explanation written in another script is not
+    if len(_GARBLE_FOREIGN_SCRIPT.findall(text)) / letters > 0.05:
+        return True
+    words = re.findall(r"[A-Za-z]{3,}", text.lower())
+    # a single token repeated over and over is a decoding loop
+    return len(words) >= 40 and max((words.count(w) for w in set(words)), default=0) / len(words) > 0.5
+
+
 def _uncertain(reason: str) -> Verdict:
     """Create an uncertain verdict with the given reason."""
     return Verdict(verdict="uncertain", confidence="low", reason=reason)
@@ -293,7 +329,7 @@ def _deterministic_fallback(bundle: EvidenceBundle, error: str | None) -> Verdic
     are auditable and re-runnable (checkpoint resume will not overwrite them,
     but a fresh run with a healthy provider will).
     """
-    from ..prompts.rule_policies import is_taint_class, rule_kind_of
+    from ..prompts.rule_policies import get_rule_short_name, is_taint_class, lookup_policy, rule_kind_of
 
     f = bundle.finding
     err = f"LLM analysis unavailable ({error or 'unknown error'})"
@@ -327,6 +363,17 @@ def _deterministic_fallback(bundle: EvidenceBundle, error: str | None) -> Verdic
             )
         return _uncertain(
             f"{err}; data-flow rule with no usable context graph — cannot decide without code analysis."
+        )
+
+    policy = lookup_policy(f.check_id) or {}
+    if policy.get("heuristic"):
+        # The scanner's match alone does not establish the defect for these rules (a vendor name in a
+        # string, literal braces, a JWT-shaped blob), and most hits are not defects. Calling them
+        # true_positive would be wrong far more often than right.
+        return _uncertain(
+            f"{err}; the {get_rule_short_name(f.check_id)} rule is a heuristic whose textual match does "
+            "not establish the defect, so no verdict can be given without reading the code. "
+            "Re-run for LLM review."
         )
 
     kind = rule_kind_of(f.check_id, f)
@@ -948,12 +995,21 @@ async def _analyze_one_round(
         run_kwargs["model_settings"] = thinking_settings
 
     try:
-        result = await asyncio.wait_for(
-            _run_with_retry(analyzer, build_user_message(bundle),
-                            label=f"Finding {index}", **run_kwargs),
-            timeout=stage_timeout,
-        )
-        analysis = result.output
+        for attempt in range(2):
+            result = await asyncio.wait_for(
+                _run_with_retry(analyzer, build_user_message(bundle),
+                                label=f"Finding {index}", **run_kwargs),
+                timeout=stage_timeout,
+            )
+            analysis = result.output
+            if not (isinstance(analysis, Verdict) and _is_garbled(analysis)):
+                break
+            # Greedy decoding would reproduce the same derailment; perturb the sampling once.
+            log.warning("Finding %d: garbled model output (attempt %d) — %s", index, attempt + 1,
+                        "retrying at temperature 0.5" if attempt == 0 else "using deterministic fallback")
+            run_kwargs["model_settings"] = {**(run_kwargs.get("model_settings") or {}), "temperature": 0.5}
+        else:
+            return _deterministic_fallback(bundle, "garbled model output")
     except asyncio.TimeoutError:
         log.warning("Analyzer timed out for finding %d", index)
         return _deterministic_fallback(bundle, f"timed out after {stage_timeout:.0f}s")
@@ -1251,6 +1307,9 @@ async def _analyze_one_group(
     for i, orig_idx in enumerate(group.original_indices):
         key = str(i)
         verdict = verdicts_by_key[key]
+        if _is_garbled(verdict):
+            log.warning("%s: garbled model output for key '%s' — deterministic fallback", label, key)
+            verdict = verdicts_by_key[key] = _deterministic_fallback(group.bundles[i], "garbled model output")
         verdict.evidence_locations = _validate_evidence_against_windows(
             verdict.evidence_locations, windows, accessed_paths,
         )

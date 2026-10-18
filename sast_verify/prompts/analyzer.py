@@ -16,7 +16,10 @@ These are mistakes other analyzers have made on this task. Avoid them.
    commented-out, removed, missing, or "not present", quote the exact line
    verbatim from the snippet you are looking at. If the scanner's flagged
    line number falls inside the snippet you have, the code IS there — you
-   may not claim otherwise. Read the line; do not guess.
+   may not claim otherwise. Read the line; do not guess. The same holds for
+   other files: do not state that a file imports, calls, or configures something
+   unless you opened it and can quote the line. An unverified claim about
+   another file (or about "the whole workflow") is a fabrication — omit it.
 
 2. **Honor suppression pragmas.** If the flagged line, the line above it,
    or its containing block carries `// nosec`, `#nosec`, `// nolint`,
@@ -181,16 +184,18 @@ the code. Your only task is to evaluate the security finding.
 """
 
 _SOLO_JSON = """\
-{"verdict": "true_positive|false_positive|uncertain", "is_security_vulnerability": true|false, "confidence": "high|medium|low", "severity": "critical|high|medium|low", "reason": "one or two sentence explanation", "evidence_locations": ["file:line"], "source_trust": "attacker_controlled|external_service|operator_config|internal|hardcoded|unknown", "taint_flow_verified": true|false|null, "execution_trace": ["file:line — verified fact", "..."], "attack_scenario": "concrete attack narrative for exploitable TPs, else null"}\
+{"reason": "one or two sentence explanation", "execution_trace": ["file:line — verified fact", "..."], "evidence_locations": ["file:line"], "source_trust": "attacker_controlled|external_service|operator_config|internal|hardcoded|unknown", "taint_flow_verified": true|false|null, "verdict": "true_positive|false_positive|uncertain", "is_security_vulnerability": true|false, "confidence": "high|medium|low", "severity": "critical|high|medium|low", "attack_scenario": "concrete attack narrative for exploitable TPs, else null"}\
 """
 
 _FIELD_RULES = """\
-Field rules:
+Field rules (fields are written in this order — state the facts you verified in `reason`
+and `execution_trace` FIRST, then choose the verdict they support; the verdict must never
+contradict your own reason):
 - **verdict**: true_positive = finding is correct; false_positive = finding is wrong; uncertain = a named decisive fact was unobtainable
 - **is_security_vulnerability**: true if an attacker could exploit this; false only when no plausible attack scenario exists
 - **confidence**: how certain you are of the verdict
 - **severity**: for true_positive assess exploitability/impact; for false_positive or uncertain always use "low"
-- **reason**: concise explanation covering verdict and security assessment
+- **reason**: concise explanation covering verdict and security assessment, written in English regardless of the language of the code, comments or scanner message. It must agree with your verdict: never argue the pattern is absent or pinned/safe and then answer true_positive (or the reverse), and describe only the file you were given.
 - **evidence_locations**: file:line references you examined that support the verdict
 - **source_trust**: trust class of the data reaching the sink (taxonomy above)
 - **taint_flow_verified**: true only if you confirmed the source→sink flow hop-by-hop in code; false if you checked and it does not hold; null if not applicable/not traced
@@ -249,7 +254,7 @@ on its own line (no markdown fences):
 
 
 _GROUP_JSON = """\
-{"verdicts": {"0": {"verdict": "true_positive|false_positive|uncertain", "is_security_vulnerability": true|false, "confidence": "high|medium|low", "severity": "critical|high|medium|low", "reason": "...", "evidence_locations": ["file:line"], "source_trust": "attacker_controlled|external_service|operator_config|internal|hardcoded|unknown", "taint_flow_verified": true|false|null, "execution_trace": ["file:line — verified fact"], "attack_scenario": "... or null"}, "1": {...}}}\
+{"verdicts": {"0": {"reason": "...", "execution_trace": ["file:line — verified fact"], "evidence_locations": ["file:line"], "source_trust": "attacker_controlled|external_service|operator_config|internal|hardcoded|unknown", "taint_flow_verified": true|false|null, "verdict": "true_positive|false_positive|uncertain", "is_security_vulnerability": true|false, "confidence": "high|medium|low", "severity": "critical|high|medium|low", "attack_scenario": "... or null"}, "1": {...}}}\
 """
 
 

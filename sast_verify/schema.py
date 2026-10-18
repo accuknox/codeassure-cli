@@ -15,6 +15,13 @@ class Finding(BaseModel):
     category: str
     message: str
     lines: str
+    # Exact span the scanner matched. `lines` is the whole source line(s), so two matches of
+    # one rule on one line are only distinguishable by their span.
+    col: int | None = None
+    end_col: int | None = None
+    match_text: str | None = None
+    # Other matches of the same rule on the same line, merged into this finding for analysis.
+    sibling_spans: list[str] = Field(default_factory=list)
     cwe: list[str] | None = None
     confidence: str | None = None
     likelihood: str | None = None
@@ -39,23 +46,18 @@ class EvidenceBundle(BaseModel):
 
 
 class Verdict(BaseModel):
-    verdict: Literal["true_positive", "false_positive", "uncertain"] = Field(
-        description="Whether the SAST finding is a true positive, false positive, or uncertain",
-    )
-    is_security_vulnerability: bool = Field(
-        default=True,
-        description="True if the finding represents an exploitable security vulnerability; "
-        "false if it is a best-practice recommendation, style issue, or informational notice",
-    )
-    severity: Literal["critical", "high", "medium", "low"] = Field(
-        default="low",
-        description="Assessed severity for true_positive; always 'low' for false_positive/uncertain.",
-    )
-    confidence: Literal["high", "medium", "low"] = Field(
-        description="Confidence level of the verdict",
-    )
+    # Field order is generation order for the prompted-JSON analyzer: the model must write its
+    # reasoning and verified trace BEFORE it commits to a verdict, so the verdict follows from the
+    # reason instead of being justified after the fact (a verdict-first layout produced replies whose
+    # reason argued false_positive under a true_positive label).
     reason: str = Field(
         description="Plain-English explanation of the verdict, no source code",
+    )
+    execution_trace: list[str] = Field(
+        default=[],
+        description="Hop-by-hop execution/data-flow trace that was actually verified, "
+        "each entry 'file:line — what was confirmed there' (entry point, propagation, "
+        "sanitizer, sink). Empty when no tracing was needed.",
     )
     evidence_locations: list[str] = Field(
         default=[],
@@ -78,11 +80,20 @@ class Verdict(BaseModel):
         "actual code (not assumed); false if the flow was checked and does NOT hold; "
         "null when not applicable (pattern-existence rules) or not traced.",
     )
-    execution_trace: list[str] = Field(
-        default=[],
-        description="Hop-by-hop execution/data-flow trace that was actually verified, "
-        "each entry 'file:line — what was confirmed there' (entry point, propagation, "
-        "sanitizer, sink). Empty when no tracing was needed.",
+    verdict: Literal["true_positive", "false_positive", "uncertain"] = Field(
+        description="Whether the SAST finding is a true positive, false positive, or uncertain",
+    )
+    is_security_vulnerability: bool = Field(
+        default=True,
+        description="True if the finding represents an exploitable security vulnerability; "
+        "false if it is a best-practice recommendation, style issue, or informational notice",
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence level of the verdict",
+    )
+    severity: Literal["critical", "high", "medium", "low"] = Field(
+        default="low",
+        description="Assessed severity for true_positive; always 'low' for false_positive/uncertain.",
     )
     attack_scenario: str | None = Field(
         default=None,

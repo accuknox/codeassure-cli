@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .agents.runner import analyze_all, analyze_all_grouped
+from . import rule_checks
 from .grouping import build_groups
 from .preprocess import preprocess, preprocess_data
 from .retrieval import retrieve
@@ -116,6 +117,34 @@ def _prose_file_decision(finding) -> Verdict | None:
         f"ignore file ({finding.path}). Text that names a vendor is not usage of it.",
         evidence_locations=[f"{finding.path}:{finding.line}"],
     )
+
+
+def _cluster_same_line(to_analyze: list) -> tuple[list, dict[int, int]]:
+    """Collapse matches of one rule on one line into a single analysis.
+
+    A scanner reports each match separately (distinct columns), but they sit on the same
+    source line under the same rule, so a verdict per match only produces contradictions
+    (the same message was ruled TP and FP). The first match is analyzed with its siblings'
+    spans listed in the prompt; the siblings inherit its verdict.
+
+    Returns (representatives, {sibling_index: representative_index}).
+    """
+    reps: dict[tuple, int] = {}
+    siblings: dict[int, int] = {}
+    kept: list = []
+    for i, b in to_analyze:
+        f = b.finding
+        key = (f.check_id, f.path, f.line)
+        rep = reps.get(key)
+        if rep is None:
+            reps[key] = i
+            kept.append((i, b))
+            continue
+        siblings[i] = rep
+        rep_finding = next(rb.finding for ri, rb in kept if ri == rep)
+        rep_finding.sibling_spans.append(
+            f"col {f.col}–{f.end_col}: `{(f.match_text or f.lines).strip()[:160]}`")
+    return kept, siblings
 
 
 def _checkpoint_path(output_path: Path) -> Path:
@@ -473,6 +502,24 @@ def run(
         print(f"[docs] {len(prose)} AI-usage finding(s) in documentation resolved as false positive "
               f"(no LLM); {len(to_analyze)} remain", flush=True)
 
+    # Rules whose truth is a mechanical fact about the flagged text (is the ref a 40-char SHA, does
+    # the blob decode to a JOSE header, is the `{` already inside `${…}`) are decided from the
+    # source itself: no model call, and byte-identical findings get identical verdicts.
+    checked = [(i, rule_checks.decide(b.finding, codebase)) for i, b in to_analyze]
+    checked = [(i, v) for i, v in checked if v is not None]
+    if checked:
+        for i, v in checked:
+            verdicts[i] = v
+        checked_idx = {i for i, _v in checked}
+        to_analyze = [(i, b) for i, b in to_analyze if i not in checked_idx]
+        print(f"[rules] {len(checked)} finding(s) resolved by deterministic rule checks "
+              f"(no LLM); {len(to_analyze)} remain", flush=True)
+
+    to_analyze, same_line = _cluster_same_line(to_analyze)
+    if same_line:
+        print(f"[dedupe] {len(same_line)} same-rule/same-line match(es) share their sibling's verdict; "
+              f"{len(to_analyze)} remain", flush=True)
+
     # Deterministic context-graph shortcut: when a NON-DEGRADED graph proves every path
     # to the sink is dead, honor it without an LLM call — false_positive for taint/injection
     # rules, true_positive + is_security=false for pattern-existence rules (see
@@ -488,7 +535,7 @@ def run(
         print(f"[deadcode] {len(deadcode)} finding(s) resolved deterministically from a "
               f"non-degraded context graph (no LLM); {len(to_analyze)} remain", flush=True)
 
-    skipped = len(bundles) - len(to_analyze) - len(deadcode) - len(prose)
+    skipped = len(bundles) - len(to_analyze) - len(deadcode) - len(prose) - len(checked) - len(same_line)
     print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI", flush=True)
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
@@ -588,6 +635,9 @@ def run(
             flush=True,
         )
 
+    for sibling, rep in same_line.items():
+        verdicts[sibling] = verdicts[rep].model_copy(deep=True)
+
     # Enrichment pass — one extra LLM call per selected finding (rationale + business
     # context + paste-ready remediation). cfg.enrich_mode picks which: security (default) =
     # true positives that are security vulnerabilities, tp = all true positives,
@@ -676,6 +726,23 @@ _COLLAPSE_EXEMPT_RULES = frozenset({
     "missing-image-version",
     "multiple-entrypoint-instructions",
     "dockerfile-source-not-pinned",
+    # Lints and AI-usage inventory (runner._NON_SECURITY_RULE_SUBSTRINGS), plus supply-chain
+    # hardening rules whose true positives are deliberately not security vulnerabilities.
+    "missing-template-string-indicator",
+    "useless-assignment",
+    "useless-ternary",
+    "html-in-template-string",
+    "detect-generic-ai-oai",
+    "detect-generic-ai-anthprop",
+    "detect-generic-ai-api",
+    "detect-openai",
+    "github-actions-mutable-action-tag",
+    "third-party-action-not-pinned-to-commit-sha",
+    "npm-missing-minimum-release-age",
+    "pnpm-minimum-release-age",
+    "pnpm-block-exotic-sub-dependencies",
+    "pnpm-trust-policy",
+    "renovate-missing-minimum-release-age",
 })
 
 

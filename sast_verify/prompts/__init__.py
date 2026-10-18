@@ -39,7 +39,10 @@ def _get_finding_policy_note() -> str | None:
         f"A finding is **false_positive** ONLY if the detected pattern does not "
         f"exist in the code. Do not downgrade a finding to false_positive because "
         f"it is \"merely best practice\" or \"not exploitable\" — if the pattern "
-        f"exists, it is true_positive."
+        f"exists, it is true_positive. Exception: when the Rule-Specific Verdict "
+        f"Guidance gives a verdict_policy, that policy defines what \"the pattern "
+        f"exists\" means for the rule (e.g. a vendor name in prose, or literal braces "
+        f"in a message, is not the pattern) and takes precedence."
     )
 
 
@@ -233,6 +236,22 @@ def _build_context_graph_section(finding, max_paths: int = 8, max_code: int = 90
     return "\n".join(parts)
 
 
+def _match_span_lines(f) -> list[str]:
+    """Prompt lines for the exact span the scanner matched (and merged same-line siblings).
+
+    The flagged line can hold several matches of one rule; the claim is about THIS span, so
+    the model must judge it rather than the line as a whole.
+    """
+    out: list[str] = []
+    if f.match_text:
+        where = f"col {f.col}–{f.end_col}" if f.col is not None else "span"
+        out.append(f"- **matched span** ({where}): `{f.match_text.strip()}`")
+    if f.sibling_spans:
+        out.append("- **other matches of this rule on the same line** (one verdict covers all of them, "
+                   "so judge the line as a whole): " + "; ".join(f.sibling_spans))
+    return out
+
+
 def build_user_message(bundle: EvidenceBundle) -> str:
     f = bundle.finding
 
@@ -258,6 +277,7 @@ def build_user_message(bundle: EvidenceBundle) -> str:
     parts.append(f"- **category**: {f.category}")
     parts.append(f"- **claim**: {f.message}")
     parts.append(f"- **flagged code**: `{f.lines}`")
+    parts.extend(_match_span_lines(f))
 
     if f.cwe:
         parts.append(f"- **cwe**: {', '.join(f.cwe)}")
@@ -317,6 +337,7 @@ def _finding_claim_block(index: int, bundle: EvidenceBundle) -> list[str]:
         f"- **category**: {f.category}",
         f"- **claim**: {f.message}",
         f"- **flagged code**: `{f.lines}`",
+        *_match_span_lines(f),
     ]
     if f.cwe:
         parts.append(f"- **cwe**: {', '.join(f.cwe)}")
