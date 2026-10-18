@@ -8,8 +8,13 @@ RUN useradd -m -u 1000 codeassureuser
 
 WORKDIR /app
 
-# Install codeassure
-RUN uv pip install --system --no-cache git+https://github.com/accuknox/codeassure-cli.git@v0.2.0
+# Build from the parent directory containing both source checkouts:
+# docker build -f codeassure-cli/Dockerfile -t accuknox/codeassure:local .
+COPY code-context-graph/pyproject.toml code-context-graph/README.md /opt/code-context-graph/
+COPY code-context-graph/context_graph /opt/code-context-graph/context_graph
+COPY codeassure-cli/pyproject.toml codeassure-cli/README.md /opt/codeassure-cli/
+COPY codeassure-cli/sast_verify /opt/codeassure-cli/sast_verify
+RUN uv pip install --system --no-cache /opt/code-context-graph /opt/codeassure-cli
 
 # Set ownership
 RUN chown -R codeassureuser:codeassureuser /app
@@ -18,4 +23,4 @@ USER codeassureuser
 
 WORKDIR /workspace
 
-ENTRYPOINT ["codeassure", "--config", "/app/codeassure.json"]
+ENTRYPOINT ["codeassure"]

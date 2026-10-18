@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import time
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -94,6 +96,28 @@ def _deadcode_decision(finding) -> Verdict | None:
     )
 
 
+def _prose_file_decision(finding) -> Verdict | None:
+    """False positive for an AI-usage rule that matched documentation text.
+
+    The rule inventories AI SDK/API usage in code; a changelog, README or ignore file that
+    names a vendor is not usage. Resolved without an LLM call. Other file types are left to
+    the model, which applies the stricter policy in rule_policies.
+    """
+    from .prompts.rule_policies import AI_USAGE_RULES, get_rule_short_name, is_prose_file
+
+    if get_rule_short_name(finding.check_id) not in AI_USAGE_RULES or not is_prose_file(finding.path):
+        return None
+    return Verdict(
+        verdict="false_positive",
+        is_security_vulnerability=False,
+        severity="low",
+        confidence="high",
+        reason="The rule detects AI SDK/API usage in code, but the match is in a documentation or "
+        f"ignore file ({finding.path}). Text that names a vendor is not usage of it.",
+        evidence_locations=[f"{finding.path}:{finding.line}"],
+    )
+
+
 def _checkpoint_path(output_path: Path) -> Path:
     """Checkpoint file sits next to the output file."""
     return output_path.with_suffix(".checkpoint.json")
@@ -176,6 +200,18 @@ def _walk_codebase(codebase: Path) -> list[dict]:
 
 
 _COLOR_RANK = {"red": 3, "blue": 2, "green": 1, "gray": 0, "orange": -1}
+
+
+def _wants_enrichment(mode: str, verdict) -> bool:
+    """Whether the enrichment LLM pass should run for a finding with this verdict."""
+    if mode == "all":
+        return True
+    # A fallback verdict means the LLM was unavailable; enriching it would fail too.
+    if (verdict.reason or "").startswith("LLM analysis unavailable"):
+        return False
+    if verdict.verdict != "true_positive":
+        return False
+    return mode == "tp" or bool(verdict.is_security_vulnerability)
 
 
 def _apply_coloring_deterministic(context_graph: dict, verdict) -> None:
@@ -264,6 +300,7 @@ def _write_output(
     codebase: Path | None = None,
     enrichments: dict | None = None,
     enrich_fallback=None,
+    analysis_statuses: dict[int, str] | None = None,
 ) -> None:
     """Merge verdicts into original findings JSON and write output.
 
@@ -276,7 +313,13 @@ def _write_output(
     enrichments = enrichments or {}
     raw = json.loads(findings_path.read_text(encoding="utf-8"))
     for i, (result, verdict) in enumerate(zip(raw["results"], verdicts)):
+        status = (analysis_statuses or {}).get(i, "completed")
+        result["ai_analysis_status"] = status
+        if status == "skipped":
+            result.pop("verification", None)
+            continue
         verification: dict = {
+            "analysis_status": status,
             "verdict": verdict.verdict,
             "is_security_vulnerability": verdict.is_security_vulnerability,
             "severity": verdict.severity,
@@ -323,6 +366,10 @@ def _write_output(
             verification["business_logic"] = enrichment.business_logic
             verification["explanation"] = enrichment.explanation
             verification["remediation"] = enrichment.remediation.model_dump()
+            notes = (enrichment.remediation.notes or "").lower()
+            verification["enrichment_status"] = (
+                "skipped" if "enrichment not requested" in notes else
+                "fallback" if "enrichment unavailable" in notes else "completed")
 
         # Deterministic context graph (from context-graph-cli) gets colored in place
         # from (graph + verdict) alone — no LLM input — so it renders identically
@@ -331,10 +378,11 @@ def _write_output(
         context_graph = result.get("context_graph")
         if isinstance(context_graph, dict):
             try:
-                _apply_coloring_deterministic(context_graph, verdict)
+                if status == "completed":
+                    _apply_coloring_deterministic(context_graph, verdict)
             except Exception:
                 pass  # coloring is best-effort
-        else:
+        elif status == "completed":
             try:
                 finding = findings[i] if findings else compact_finding(result)
                 verification["graph"] = build_finding_graph(finding, verdict)
@@ -343,12 +391,27 @@ def _write_output(
 
         result["verification"] = verification
 
+    statuses = [r.get("ai_analysis_status", "skipped") for r in raw["results"]]
+    raw["ai_analysis"] = any(s == "completed" for s in statuses)
+    raw["ai_sast"] = {
+        "engine": "codeassure", "requested": True,
+        "status": "partial" if any(s in {"fallback", "unanchored"} for s in statuses) else "completed",
+        "total": len(statuses),
+        "analyzed": statuses.count("completed"),
+        "skipped": statuses.count("skipped"),
+        "fallback": statuses.count("fallback"),
+        "unanchored": statuses.count("unanchored"),
+    }
+
     # Embed codebase tree for visualization
     if codebase and codebase.is_dir():
         raw["codebase_tree"] = _walk_codebase(codebase)
         log.info("Codebase tree: %d entries", len(raw["codebase_tree"]))
 
-    output_path.write_text(json.dumps(raw, indent=2))
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_path.parent,
+                                     prefix=".codeassure-", suffix=".json", delete=False) as staged:
+        json.dump(raw, staged, indent=2)
+    os.replace(staged.name, output_path)
 
 
 def run(
@@ -393,6 +456,22 @@ def run(
             (i, b) for i, b in to_analyze
             if (b.finding.impact or "NOT_AVAILABLE").upper() in severities
         ]
+    selected_indices = {i for i, _ in to_analyze}
+    eligible_indices = {
+        i for i, b in enumerate(bundles)
+        if severities is None or (b.finding.impact or "NOT_AVAILABLE").upper() in severities
+    }
+
+    # Documentation matches for AI-usage rules are false positives by construction: no LLM call.
+    prose = [(i, _prose_file_decision(b.finding)) for i, b in to_analyze]
+    prose = [(i, v) for i, v in prose if v is not None]
+    if prose:
+        for i, v in prose:
+            verdicts[i] = v
+        prose_idx = {i for i, _v in prose}
+        to_analyze = [(i, b) for i, b in to_analyze if i not in prose_idx]
+        print(f"[docs] {len(prose)} AI-usage finding(s) in documentation resolved as false positive "
+              f"(no LLM); {len(to_analyze)} remain", flush=True)
 
     # Deterministic context-graph shortcut: when a NON-DEGRADED graph proves every path
     # to the sink is dead, honor it without an LLM call — false_positive for taint/injection
@@ -409,13 +488,22 @@ def run(
         print(f"[deadcode] {len(deadcode)} finding(s) resolved deterministically from a "
               f"non-degraded context graph (no LLM); {len(to_analyze)} remain", flush=True)
 
-    skipped = len(bundles) - len(to_analyze) - len(deadcode)
+    skipped = len(bundles) - len(to_analyze) - len(deadcode) - len(prose)
     print(f"{skipped} finding(s) skipped due to severity filter; {len(to_analyze)} finding(s) to analyze with AI", flush=True)
     if skipped:
         log.warning("%d finding(s) skipped (no anchored evidence)", skipped)
 
     # Load checkpoint — skip already-completed findings
-    checkpoint = _load_checkpoint(output_path)
+    # Indices alone are unsafe across new scans or config changes. Bind resumes
+    # to this exact input, source revision and model/policy configuration.
+    identity_path = output_path.with_suffix(".checkpoint.identity")
+    identity = hashlib.sha256((json.dumps(raw_findings_json, sort_keys=True)
+        + str(codebase.resolve()) + cfg.model_dump_json()
+        + json.dumps([b.model_dump(mode="json") for b in bundles], sort_keys=True)).encode()).hexdigest()
+    checkpoint = _load_checkpoint(output_path) if identity_path.is_file() and identity_path.read_text() == identity else {}
+    identity_path.write_text(identity)
+    checkpoint = {i: v for i, v in checkpoint.items() if i in selected_indices
+                  and not v.reason.startswith("LLM analysis unavailable")}
     for idx, verdict in checkpoint.items():
         if idx < len(verdicts):
             verdicts[idx] = verdict
@@ -433,7 +521,7 @@ def run(
     from .accuknox import lookup_existing_verdict_async
     base_url = os.environ.get("ACCUKNOX_BASE_URL", "").rstrip("/")
     token = os.environ.get("ACCUKNOX_BEARER_TOKEN", "")
-    if to_analyze and base_url and token:
+    if to_analyze and base_url and token and os.getenv("ACCUKNOX_REUSE_AI_VERDICTS", "").upper() == "TRUE":
         import httpx
 
         repo_id = repo_id_from_file or os.environ.get("ACCUKNOX_REPO_ID", "")
@@ -500,14 +588,27 @@ def run(
             flush=True,
         )
 
-    # Enrichment pass — one extra LLM call per finding. EVERY finding gets an
-    # enrichment (rationale + business context + paste-ready remediation):
-    # deadcode-resolved and uncertain findings included — a developer still needs
-    # to know what the code does and how to harden it. LLM failures degrade to a
-    # deterministic fallback enrichment, so the output schema is always complete.
+    # Enrichment pass — one extra LLM call per selected finding (rationale + business
+    # context + paste-ready remediation). cfg.enrich_mode picks which: security (default) =
+    # true positives that are security vulnerabilities, tp = all true positives,
+    # all = every decided finding, off = none. Findings the policy skips (and LLM
+    # failures) get a deterministic fallback enrichment, so the output schema stays
+    # complete; verification.enrichment_status tells them apart.
     enrichments: dict = {}
-    if cfg.enrichment:
-        enrich_items = [(i, b, verdicts[i]) for i, b in enumerate(bundles)]
+    enrich_mode = cfg.enrich_mode
+    policy_skipped: set[int] = set()
+    if enrich_mode != "off":
+        enrich_items = []
+        for i, b in enumerate(bundles):
+            if i not in eligible_indices:
+                continue
+            if not _wants_enrichment(enrich_mode, verdicts[i]):
+                policy_skipped.add(i)
+                continue
+            enrich_items.append((i, b, verdicts[i]))
+        if policy_skipped:
+            print(f"[enrich] mode={enrich_mode}: skipping {len(policy_skipped)} finding(s) "
+                  f"not selected for enrichment", flush=True)
         if enrich_items:
             from .agents.enrich import enrich_all
             print(f"[enrich] enriching {len(enrich_items)} finding(s)…", flush=True)
@@ -521,23 +622,33 @@ def run(
                       f"enrichment (LLM unavailable)", flush=True)
 
     enrich_fallback = None
-    if cfg.enrichment:
+    if enrich_mode != "off":
         from .agents.enrich import fallback_enrichment
 
         def enrich_fallback(i: int, verdict):
             if 0 <= i < len(bundles):
+                if i in policy_skipped:
+                    return fallback_enrichment(
+                        bundles[i], verdict,
+                        skipped=f"not requested for this verdict (CODEASSURE_ENRICH={enrich_mode})")
                 return fallback_enrichment(bundles[i], verdict, "not produced in this run")
             return None
 
     _write_output(findings_path, output_path, verdicts, findings=findings,
                   codebase=codebase, enrichments=enrichments,
-                  enrich_fallback=enrich_fallback)
+                  enrich_fallback=enrich_fallback,
+                  analysis_statuses={i: (
+                      "skipped" if i not in eligible_indices else
+                      "unanchored" if i not in selected_indices else
+                      "fallback" if v.reason.startswith("LLM analysis unavailable") else "completed"
+                  ) for i, v in enumerate(verdicts)})
 
     # Clean up checkpoint on successful completion
     cp = _checkpoint_path(output_path)
     if cp.is_file():
         cp.unlink()
         log.info("Checkpoint removed (run complete)")
+    identity_path.unlink(missing_ok=True)
 
     total_elapsed = time.perf_counter() - wall_start
     print(

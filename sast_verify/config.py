@@ -6,7 +6,9 @@ from pathlib import Path
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
 
 
 _OPENAI_COMPATIBLE_PROVIDERS = frozenset({"openai", "openai-compatible"})
@@ -15,6 +17,32 @@ _GOOGLE_PROVIDERS = frozenset({"google", "gemini"})
 _ALL_SUPPORTED_PROVIDERS = _OPENAI_COMPATIBLE_PROVIDERS | _ANTHROPIC_PROVIDERS | _GOOGLE_PROVIDERS
 
 ThinkingMode = Literal["full", "low", "off"]
+
+# Gateways such as OpenRouter forward vendor-specific values (e.g. "asap") that the
+# OpenAI client's strict response model rejects, discarding an otherwise valid reply.
+_VALID_SERVICE_TIERS = frozenset({"auto", "default", "flex", "scale", "priority", "fast"})
+
+
+async def _drop_unknown_service_tier(response) -> None:
+    if "json" not in response.headers.get("content-type", ""):
+        return  # streaming/SSE and non-JSON bodies pass through untouched
+    await response.aread()
+    try:
+        body = json.loads(response.content)
+    except ValueError:
+        return
+    if isinstance(body, dict) and body.get("service_tier") not in (None, *_VALID_SERVICE_TIERS):
+        del body["service_tier"]
+        response._content = json.dumps(body).encode()
+        response.headers["content-length"] = str(len(response._content))
+
+
+def _openai_http_client():
+    import httpx
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(600, connect=5),
+        event_hooks={"response": [_drop_unknown_service_tier]},
+    )
 
 # Default severity → thinking-effort mapping for reasoning models
 _DEFAULT_THINKING_MAP: dict[str, ThinkingMode] = {
@@ -41,6 +69,14 @@ class ModelConfig(BaseModel):
     api_key: str | None = Field(default=None, description="API key (overrides env vars; supports $VAR_NAME syntax for env var references)")
     tool_calling: bool = Field(default=True, description="Set to false for models that don't support tool/function calling")
     temperature: float | None = Field(default=0.0, description="Sampling temperature (0.0 = deterministic; recommended default so verdicts are stable run-to-run). Raise (e.g. 0.5) only with voting_rounds>1, which needs sampling diversity. Set null to use model default.")
+
+    @field_validator("provider", "name", "api_base", mode="before")
+    @classmethod
+    def _expand_env_ref(cls, v):
+        """Resolve a whole-value ``"$VAR_NAME"`` reference from the environment."""
+        if isinstance(v, str) and re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", v):
+            return os.environ.get(v[1:]) or None
+        return v
 
 
 class ValidatorConfig(BaseModel):
@@ -94,6 +130,12 @@ class Config(BaseModel):
         "(rationale, business logic, explanation, copy-paste remediation, colored context graph). "
         "One extra LLM call per decided finding.",
     )
+    enrich: Literal["all", "tp", "security", "off"] = Field(
+        default="security",
+        description="Which findings get the enrichment pass: 'security' = true positives that are "
+        "security vulnerabilities (default), 'tp' = all true positives, 'all' = every decided "
+        "finding, 'off' = none. Overridden by the CODEASSURE_ENRICH env var.",
+    )
     thinking_map: dict[str, ThinkingMode] | None = Field(
         # default_factory=lambda: dict(_DEFAULT_THINKING_MAP),
         default=None,
@@ -133,6 +175,16 @@ class Config(BaseModel):
             return os.environ.get(raw[1:])
         return raw
     
+    @property
+    def enrich_mode(self) -> str:
+        """Effective enrichment mode: CODEASSURE_ENRICH > config file; `enrichment: false` means off."""
+        env = os.environ.get("CODEASSURE_ENRICH", "").strip().lower()
+        if env:
+            if env not in ("all", "tp", "security", "off"):
+                raise ValueError(f"CODEASSURE_ENRICH={env!r} is invalid; use security|tp|all|off")
+            return env
+        return self.enrich if self.enrichment else "off"
+
     def build_model(self):
         if self.model.provider not in _ALL_SUPPORTED_PROVIDERS:
             raise ValueError(
@@ -151,6 +203,7 @@ class Config(BaseModel):
                 kwargs["base_url"] = base if base.endswith("/v1") else f"{base}/v1"
             if api_key is not None:
                 kwargs["api_key"] = api_key
+            kwargs["http_client"] = _openai_http_client()
             return OpenAIChatModel(self.model.name, provider=OpenAIProvider(**kwargs))
 
         if self.model.provider in _ANTHROPIC_PROVIDERS:
@@ -200,6 +253,7 @@ class Config(BaseModel):
                 kwargs["base_url"] = v.api_base
             if v.api_key:
                 kwargs["api_key"] = v.api_key
+            kwargs["http_client"] = _openai_http_client()
             return OpenAIChatModel(v.name, provider=OpenAIProvider(**kwargs))
         raise ValueError(f"Unsupported validator provider: {v.provider!r}")
 
@@ -225,8 +279,20 @@ def load_config(path: Path | None = None) -> Config:
             _active.apply()
             return _active
 
+    # No file: build the model config from CODEASSURE_* env vars (CI-friendly).
+    if os.environ.get("CODEASSURE_MODEL_NAME"):
+        _active = Config(model=ModelConfig(
+            provider=os.environ.get("CODEASSURE_MODEL_PROVIDER", "openai"),
+            name=os.environ["CODEASSURE_MODEL_NAME"],
+            api_base=os.environ.get("CODEASSURE_API_BASE"),
+            api_key="$CODEASSURE_API_KEY",
+        ))
+        _active.apply()
+        return _active
+
     raise FileNotFoundError(
-        "No codeassure.json found. Create one or pass --config <path>."
+        "No codeassure.json found. Create one, pass --config <path>, or set CODEASSURE_MODEL_NAME "
+        "(plus CODEASSURE_MODEL_PROVIDER, CODEASSURE_API_BASE, CODEASSURE_API_KEY)."
     )
 
 

@@ -7,6 +7,20 @@ Each entry maps a check_id short name to:
 """
 from __future__ import annotations
 
+# These rules are loose keyword matches that exist to inventory *AI usage*. A mention of the
+# vendor's name is not usage, so the checklist asks about the role of the match, not its presence.
+def _ai_usage_constraints(vendor: str) -> list[str]:
+    return [
+        "Read the flagged line and its file: is it executable code, a manifest/config, or prose/comment text?",
+        f"Is it an import/require of the {vendor} SDK, construction or call of its client, a request to its "
+        "API, or a dependency/provider declaration that wires it in?",
+        "Is the match only inside a comment, docstring, description field, changelog/README text, or a string "
+        "or constant that merely names an internal package or export path?",
+        f"VERDICT: TP only if {vendor} is actually used or declared as a dependency. FP if the word appears "
+        "only as text (comment, prose, name of a package this project publishes, file or directory name).",
+    ]
+
+
 RULE_POLICIES: dict[str, dict] = {
     "dangerous-subprocess-use-audit": {
         "verdict_policy": (
@@ -100,43 +114,43 @@ RULE_POLICIES: dict[str, dict] = {
     },
     "detect-generic-ai-oai": {
         "verdict_policy": (
-            "true_positive if OpenAI library usage is detected in the code."
+            "true_positive only if the flagged line is real OpenAI usage: an import/require of the "
+            "OpenAI SDK, constructing or calling its client, a request to the OpenAI API, or a "
+            "dependency/provider declaration that wires it in. false_positive if the match is only "
+            "the word in a comment, docstring, prose, a description field, or a string/constant "
+            "that names a package or path."
         ),
         "rule_kind": "informational",
-        "constraints": [
-            "Is there an import, reference, or usage of OpenAI/openai at the flagged location?",
-            "VERDICT: TP if OpenAI usage exists. FP only if no OpenAI reference found.",
-        ],
+        "constraints": _ai_usage_constraints("OpenAI/openai"),
     },
     "detect-generic-ai-anthprop": {
         "verdict_policy": (
-            "true_positive if Anthropic library usage is detected in the code."
+            "true_positive only if the flagged line is real Anthropic usage: an import/require of the "
+            "Anthropic SDK, constructing or calling its client, a request to the Anthropic API, or a "
+            "dependency/provider declaration that wires it in. false_positive if the match is only "
+            "the word in a comment, docstring, prose, a description field, or a string/constant "
+            "that names a package or path."
         ),
         "rule_kind": "informational",
-        "constraints": [
-            "Is there an import, reference, or usage of Anthropic/anthropic at the flagged location?",
-            "VERDICT: TP if Anthropic usage exists. FP only if no reference found.",
-        ],
+        "constraints": _ai_usage_constraints("Anthropic/anthropic"),
     },
     "detect-generic-ai-api": {
         "verdict_policy": (
-            "true_positive if AI API HTTP request usage is detected in the code."
+            "true_positive only if the flagged line makes or configures a real HTTP request to an AI "
+            "service API. false_positive if it is only a mention in a comment, docstring, prose or a "
+            "string that is not used as a request target."
         ),
         "rule_kind": "informational",
-        "constraints": [
-            "Is there an HTTP request to an AI service API at the flagged location?",
-            "VERDICT: TP if AI API call exists. FP only if no such call found.",
-        ],
+        "constraints": _ai_usage_constraints("an AI service"),
     },
     "detect-openai": {
         "verdict_policy": (
-            "true_positive if OpenAI SDK usage is detected in the code."
+            "true_positive only if the flagged line is real OpenAI SDK usage (import, client "
+            "construction/call, or a dependency declaration). false_positive if it is only the word "
+            "in a comment, docstring, prose or a string/constant that names a package or path."
         ),
         "rule_kind": "informational",
-        "constraints": [
-            "Is there OpenAI SDK usage at the flagged location?",
-            "VERDICT: TP if usage exists. FP only if no reference found.",
-        ],
+        "constraints": _ai_usage_constraints("OpenAI/openai"),
     },
     "missing-user-entrypoint": {
         "verdict_policy": (
@@ -272,3 +286,17 @@ def rule_kind_of(check_id: str, finding=None) -> str:
     if policy:
         return policy.get("rule_kind", "pattern_existence")
     return "taint_class" if is_taint_class(check_id, finding) else "pattern_existence"
+
+
+# Rules that inventory AI usage in *source*. Prose can describe AI but cannot use it, so a match
+# in a documentation or ignore file is a false positive without needing a model to read it.
+AI_USAGE_RULES = frozenset({
+    "detect-generic-ai-oai", "detect-generic-ai-anthprop", "detect-generic-ai-api", "detect-openai",
+})
+PROSE_SUFFIXES = frozenset({".md", ".mdx", ".markdown", ".rst", ".txt", ".adoc"})
+
+
+def is_prose_file(path: str) -> bool:
+    """Documentation / ignore files: text a reader sees, never code a program runs."""
+    name = path.rsplit("/", 1)[-1].lower()
+    return name.endswith(tuple(PROSE_SUFFIXES)) or (name.startswith(".") and name.endswith("ignore"))

@@ -41,7 +41,8 @@ def build_enricher() -> Agent[AnalyzerDeps, Enrichment]:
     return Agent(cfg.build_model(), **kwargs)
 
 
-def fallback_enrichment(bundle: EvidenceBundle, verdict: Verdict, error: str | None = None) -> Enrichment:
+def fallback_enrichment(bundle: EvidenceBundle, verdict: Verdict, error: str | None = None,
+                        skipped: str | None = None) -> Enrichment:
     """Deterministic enrichment when the LLM pass failed/was unavailable.
 
     Honest and minimal: rationale mirrors the verdict reason, remediation points
@@ -50,8 +51,11 @@ def fallback_enrichment(bundle: EvidenceBundle, verdict: Verdict, error: str | N
     never miss the keys.
     """
     f = bundle.finding
-    note = f"Automated enrichment unavailable ({error})." if error else \
-        "Automated enrichment unavailable."
+    if skipped:
+        note = f"Automated enrichment not requested: {skipped}."
+    else:
+        note = f"Automated enrichment unavailable ({error})." if error else \
+            "Automated enrichment unavailable."
     cg = getattr(f, "context_graph", None)
     flow = ""
     if isinstance(cg, dict) and cg.get("paths"):

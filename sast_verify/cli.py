@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import tempfile
 
 
 def _load_dotenv() -> None:
@@ -60,6 +61,14 @@ def main() -> None:
         "--jobs", "-j", type=int, default=None, metavar="N",
         help="Max concurrent LLM requests (overrides config)",
     )
+    parser.add_argument("--no-context-graph", action="store_true",
+                        help="Explicitly skip deterministic graph generation")
+    parser.add_argument("--context-graph-config", type=Path,
+                        help="Configuration for the context-graph CLI")
+    parser.add_argument("--graph-no-joern", action="store_true",
+                        help="Use the native tree-sitter graph tier without Joern")
+    parser.add_argument("--graph-timeout", type=int, default=1200,
+                        help="Maximum seconds for graph generation (default: 1200)")
     parser.add_argument(
         "--no-grouping", action="store_true", default=False,
         help="Disable finding grouping (analyze each finding independently)",
@@ -88,8 +97,11 @@ def main() -> None:
 
     import logging
     import os
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # CODEASSURE_LOG_LEVEL=DEBUG also logs every HTTP request/response status.
+    level = getattr(logging, os.environ.get("CODEASSURE_LOG_LEVEL", "INFO").upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+    http_level = logging.INFO if level <= logging.DEBUG else logging.WARNING
+    logging.getLogger("httpx").setLevel(http_level)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     if args.anthropic_key:
         os.environ["ANTHROPIC_API_KEY"] = args.anthropic_key
@@ -107,18 +119,36 @@ def main() -> None:
 
     if concurrency < 1:
         parser.error("--jobs must be at least 1")
+    if args.graph_timeout < 1:
+        parser.error("--graph-timeout must be at least 1")
+    if not args.codebase.is_dir() or not args.findings.is_file():
+        parser.error("--codebase must be a directory and --findings an existing JSON file")
 
-    run(
-        args.codebase, args.findings, args.output,
-        concurrency=concurrency,
-        severities=args.severity.split(","),
-        enable_grouping=args.grouping,
-        claude_verification=args.claude_verification,
-    )
+    # A private intermediate keeps the original scan intact if either stage fails,
+    # including when --findings and --output refer to the same file.
+    with tempfile.TemporaryDirectory(prefix="codeassure-graph-") as directory:
+        findings = args.findings
+        if not args.no_context_graph:
+            from .context_graph import generate_graphs
+            findings = Path(directory) / "findings.json"
+            generate_graphs(args.codebase, args.findings, findings,
+                            config=args.context_graph_config, no_joern=args.graph_no_joern,
+                            timeout=args.graph_timeout)
+        run(
+            args.codebase, findings, args.output,
+            concurrency=concurrency,
+            severities=[s.strip().upper() for s in args.severity.split(",")],
+            enable_grouping=args.grouping and not args.no_grouping,
+            claude_verification=args.claude_verification,
+        )
 
     if args.verify:
         csv_path = args.output.with_suffix(".csv")
         verify(args.output, args.verify, csv_path)
+
+    import json
+    if json.loads(args.output.read_text(encoding="utf-8")).get("ai_sast", {}).get("status") == "partial":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

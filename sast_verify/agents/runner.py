@@ -144,6 +144,17 @@ def _error_detail(exc: BaseException) -> str:
     return name
 
 
+def _error_chain(exc: BaseException, limit: int = 400) -> str:
+    """Full message of an exception and its causes, for logs (not verdict reasons)."""
+    parts, cur, seen = [], exc, 0
+    while cur is not None and seen < 4:
+        msg = " ".join(str(cur).split())
+        parts.append(f"{type(cur).__name__}: {msg}"[:limit])
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return " <- ".join(parts)
+
+
 async def _run_with_retry(agent, message, *, retries: int | None = None,
                           base_delay: float = 2.0, label: str = "", **kwargs):
     """Run an agent call, retrying every transient failure (rate limits, 5xx,
@@ -166,7 +177,7 @@ async def _run_with_retry(agent, message, *, retries: int | None = None,
                 delay = min(base_delay * (2 ** attempt), 45.0) * random.uniform(0.6, 1.4)
             log.warning(
                 "%s: transient LLM error (attempt %d/%d), retrying in %.1fs: %s",
-                label or "agent", attempt + 1, attempts, delay, _error_detail(exc),
+                label or "agent", attempt + 1, attempts, delay, _error_chain(exc),
             )
             await asyncio.sleep(delay)
 

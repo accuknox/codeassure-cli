@@ -5,11 +5,11 @@ verdict. For pattern-existence rules the verdict is a pure at-site presence chec
 reachability may only touch is_security_vulnerability / severity.
 """
 import sast_verify.prompts.analyzer as A
-from sast_verify.pipeline import _deadcode_decision, _is_deadcode
+from sast_verify.pipeline import _deadcode_decision, _is_deadcode, _prose_file_decision
 from sast_verify.preprocess import compact_finding
 from sast_verify.prompts import build_user_message
 from sast_verify.prompts.analyzer import _ANALYZER_VARIANTS
-from sast_verify.prompts.rule_policies import is_taint_class, rule_kind_of
+from sast_verify.prompts.rule_policies import get_constraints, is_prose_file, is_taint_class, lookup_policy, rule_kind_of
 from sast_verify.schema import Evidence, EvidenceBundle
 
 
@@ -117,3 +117,40 @@ def test_all_analyzer_variants_carry_guardrails():
         assert "## Common pitfalls" in t, name
         assert "nosemgrep" in t, name
         assert "Verdict and security flag are independent" in t, name
+
+
+# --- AI-usage rules: a vendor name in text is not usage ----------------------
+
+ANTHROPIC_RULE = "Users.jarvis..local.bin.accuknox.sast.rules.ai.generic.detect-generic-ai-anthprop"
+
+
+def test_ai_usage_rule_in_changelog_is_false_positive_without_llm():
+    f = _finding(ANTHROPIC_RULE, path=".changeset/preview-sdk-surface-fill.md")
+    v = _prose_file_decision(f)
+    assert v is not None
+    assert v.verdict == "false_positive"
+    assert v.is_security_vulnerability is False
+    assert v.evidence_locations == [".changeset/preview-sdk-surface-fill.md:10"]
+
+
+def test_ai_usage_rule_in_code_and_manifests_still_goes_to_the_model():
+    for path in ("src/anthropic/decorator.ts", "packages/integrations/package.json", ".github/workflows/x.yaml"):
+        assert _prose_file_decision(_finding(ANTHROPIC_RULE, path=path)) is None
+
+
+def test_prose_shortcut_ignores_other_rules():
+    assert _prose_file_decision(_finding("python.best-practice.use-timeout", path="README.md")) is None
+
+
+def test_is_prose_file():
+    for path in ("README.md", "docs/a/b.MDX", "notes.txt", ".gitignore", "x/.dockerignore", "spec/00.rst"):
+        assert is_prose_file(path), path
+    for path in ("a.ts", "package.json", "ci.yaml", "Dockerfile", "mdx.py", "gitignore.py"):
+        assert not is_prose_file(path), path
+
+
+def test_ai_usage_policy_requires_real_usage_not_a_mention():
+    policy = lookup_policy(ANTHROPIC_RULE)
+    assert "false_positive" in policy["verdict_policy"] and "comment" in policy["verdict_policy"]
+    joined = " ".join(get_constraints(ANTHROPIC_RULE))
+    assert "only as text" in joined and "Anthropic/anthropic" in joined

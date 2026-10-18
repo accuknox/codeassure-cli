@@ -43,17 +43,25 @@ def _build_params(fingerprint: str, repo_id: str | None = None) -> dict:
 
 def _parse_verdict(data: dict) -> Verdict | None:
     results = data.get("results", {})
-    items = results.get("data", []) if isinstance(results, dict) else []
+    items = results.get("data", []) if isinstance(results, dict) else results if isinstance(results, list) else []
     item = items[0] if items else None
     if not item:
         return None
-    is_fp = bool(item.get("misc__is_false_positive", False))
+    misc = item.get("misc") or {}
+    verification = misc.get("verification") or item.get("misc__verification") or {}
+    # An ordinary SAST finding is not a previously validated true positive.
+    # Reuse requires an explicit verdict and independent exploitability flag.
+    if verification.get("analysis_status", "completed") != "completed":
+        return None
+    if verification.get("verdict") not in {"true_positive", "false_positive", "uncertain"} or not isinstance(verification.get("is_security_vulnerability"), bool):
+        return None
     return Verdict(
-        verdict="false_positive" if is_fp else "true_positive",
-        is_security_vulnerability=not is_fp,
-        severity=_map_severity(item.get("misc__final_severity")),
-        confidence="high",
-        reason=item.get("misc__validation_reason") or "Previously validated finding from AccuKnox.",
+        verdict=verification["verdict"],
+        is_security_vulnerability=verification["is_security_vulnerability"],
+        severity=_map_severity(verification.get("severity")),
+        confidence=verification.get("confidence") or "low",
+        reason=verification.get("reason") or "Previously validated finding from AccuKnox.",
+        evidence_locations=[e["location"] for e in verification.get("evidence", []) if isinstance(e, dict) and e.get("location")],
     )
 
 
