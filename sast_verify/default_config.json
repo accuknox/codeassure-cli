@@ -1,0 +1,10 @@
+{
+  "model": {
+    "provider": "openai",
+    "name": "z-ai/glm-5.3-flash",
+    "api_base": "https://openrouter.ai/api",
+    "api_key": "$CODEASSURE_API_KEY",
+    "tool_calling": true
+  },
+  "concurrency": 4
+}

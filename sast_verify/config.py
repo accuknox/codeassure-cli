@@ -290,6 +290,14 @@ def load_config(path: Path | None = None) -> Config:
         _active.apply()
         return _active
 
+    # Last resort: the default config shipped inside the package/binary. It holds no
+    # secret - only the API key env var name - so a CI job just exports CODEASSURE_API_KEY.
+    bundled = Path(__file__).with_name("default_config.json")
+    if bundled.is_file():
+        _active = Config.model_validate(json.loads(bundled.read_text(encoding="utf-8")))
+        _active.apply()
+        return _active
+
     raise FileNotFoundError(
         "No codeassure.json found. Create one, pass --config <path>, or set CODEASSURE_MODEL_NAME "
         "(plus CODEASSURE_MODEL_PROVIDER, CODEASSURE_API_BASE, CODEASSURE_API_KEY)."

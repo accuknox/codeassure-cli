@@ -7,6 +7,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
+        ('sast_verify/default_config.json', 'sast_verify'),
         *copy_metadata('genai_prices'),
         *copy_metadata('pydantic_ai_slim'),
     ],
