@@ -35,8 +35,22 @@ Without it the graph falls back to the tree-sitter tier (or pass `--graph-no-joe
 
 ## Use
 
-A config file is required: `codeassure.json` in the working directory, or `--config PATH`.
-`codeassure.jsonc` in the repo is the fully commented reference. Minimal example:
+The binary does **not** embed a config. It resolves the model settings in this order:
+
+1. `--config PATH`
+2. `./codeassure.json` in the current directory
+3. environment variables only (no file needed, good for CI):
+
+```bash
+export CODEASSURE_MODEL_NAME=your-model-name
+export CODEASSURE_MODEL_PROVIDER=openai          # openai | openai-compatible | anthropic | google (default: openai)
+export CODEASSURE_API_BASE=http://localhost:5000 # optional
+export CODEASSURE_API_KEY=<key>
+```
+
+With none of the three it exits with "No codeassure.json found". Use a file when you need more than the
+model (concurrency, enrichment, thinking map, ...); `codeassure.jsonc` in the repo is the fully commented
+reference. Minimal example:
 
 ```json
 {
@@ -51,7 +65,7 @@ A config file is required: `codeassure.json` in the working directory, or `--con
 }
 ```
 
-Export the key the config refers to (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`, matching the provider), then:
+Then run:
 
 ```bash
 codeassure --codebase ./my-project --findings results.json --output verified.json
