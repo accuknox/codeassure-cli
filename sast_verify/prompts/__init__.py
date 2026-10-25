@@ -121,6 +121,13 @@ def _build_context_triage_note(finding) -> str | None:
     return "\n".join(lines)
 
 
+def _node_name(n: dict) -> str:
+    """Display name of a graph node: function for function-level nodes, the line/route for finer ones."""
+    if n.get("scope") in ("statement", "entry"):
+        return f"`{n.get('signature') or n.get('label')}`"
+    return n.get("function") or n.get("label") or "?"
+
+
 def _build_context_graph_section(finding, max_paths: int = 8, max_code: int = 900) -> str | None:
     """Render the deterministic source→sink context graph as prompt grounding.
 
@@ -158,8 +165,7 @@ def _build_context_graph_section(finding, max_paths: int = 8, max_code: int = 90
     trace_targets: list[str] = []
     _seen_t: set = set()
     def _fmt_target(n: dict) -> str:
-        fn = n.get("function") or n.get("label") or "?"
-        return f"{fn} ({n.get('file')}:{n.get('line')})"
+        return f"{_node_name(n)} ({n.get('file')}:{n.get('line')})"
     for n in cg.get("nodes", []):
         if n.get("kind") in ("source", "route") and n.get("id") not in _seen_t:
             _seen_t.add(n.get("id"))
@@ -201,7 +207,7 @@ def _build_context_graph_section(finding, max_paths: int = 8, max_code: int = 90
         chain = []
         for nid in p.get("nodes", []):
             n = nodes.get(nid, {})
-            label = f"{n.get('function') or n.get('label')} ({n.get('file')}:{n.get('line')})"
+            label = f"{_node_name(n)} ({n.get('file')}:{n.get('line')})"
             if n.get("kind") == "sink":
                 label += " [SINK]"
             elif n.get("kind") == "source":
@@ -226,11 +232,13 @@ def _build_context_graph_section(finding, max_paths: int = 8, max_code: int = 90
     for nid in shown_ids:
         n = nodes.get(nid, {})
         code = (n.get("code") or "").strip()
-        key = (n.get("file"), n.get("function"))
+        # Statement/entry nodes hold one line inside a function; keying them by function would let
+        # them shadow the function body that the sink node carries.
+        key = (n.get("file"), n.get("function"), n.get("scope") or "", n.get("line") if n.get("scope") else None)
         if not code or key in seen_fns:
             continue
         seen_fns.add(key)
-        parts.append(f"#### {n.get('function') or n.get('label')} — {n.get('file')}:{n.get('line')}")
+        parts.append(f"#### {_node_name(n)} — {n.get('file')}:{n.get('line')}")
         parts.append(f"```\n{code[:max_code]}\n```")
 
     return "\n".join(parts)

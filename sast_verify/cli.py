@@ -115,7 +115,7 @@ def main() -> None:
         cfg = load_config(args.config)
     except FileNotFoundError as e:
         parser.error(str(e))
-    concurrency = args.jobs if args.jobs is not None else cfg.concurrency
+    concurrency = args.jobs if args.jobs is not None else cfg.effective_concurrency
 
     if concurrency < 1:
         parser.error("--jobs must be at least 1")

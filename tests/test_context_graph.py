@@ -129,3 +129,28 @@ def test_enrichment_schema_roundtrip():
     d = e.model_dump()
     assert d["remediation"]["preserves_logic"] is True
     assert d["coloring"]["paths"][0]["color"] == "green"
+
+
+def test_graph_prompt_keeps_function_body_beside_statement_and_entry_nodes():
+    from types import SimpleNamespace
+
+    from sast_verify.prompts import _build_context_graph_section
+
+    body = "function lookup(req) {\n  const id = req.query.id;\n  db.query(id);\n}"
+    nodes = [
+        {"id": "n0", "kind": "route", "scope": "entry", "label": "GET /user", "signature": "GET /user",
+         "file": "a.js", "line": 4, "function": "", "code": "app.get('/user', handler)"},
+        {"id": "n1", "kind": "source", "scope": "statement", "label": "a.js:5",
+         "signature": "const id = req.query.id;", "file": "a.js", "line": 5, "function": "",
+         "code": "const id = req.query.id;"},
+        {"id": "n_sink", "kind": "sink", "scope": "", "label": "a.js:6", "file": "a.js", "line": 6,
+         "function": "lookup", "code": body},
+    ]
+    cg = {"engine": "joern", "language": "javascript", "stats": {}, "sink": {"file": "a.js", "line": 6},
+          "nodes": nodes, "paths": [{"id": "p0", "nodes": ["n0", "n1", "n_sink"], "tainted": True,
+                                     "reachability": "reachable", "protection": {}}]}
+    text = _build_context_graph_section(SimpleNamespace(context_graph=cg))
+    assert "`GET /user` (a.js:4) → `const id = req.query.id;` (a.js:5) [SOURCE:" in text
+    assert "lookup (a.js:6) [SINK]" in text
+    assert "db.query(id);" in text  # the full function body is still shown for the sink
+    assert "#### `const id = req.query.id;` — a.js:5" in text

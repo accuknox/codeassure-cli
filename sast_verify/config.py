@@ -176,6 +176,20 @@ class Config(BaseModel):
         return raw
     
     @property
+    def effective_concurrency(self) -> int:
+        """Parallel LLM calls: CODEASSURE_CONCURRENCY > config file / env-config default."""
+        env = os.environ.get("CODEASSURE_CONCURRENCY", "").strip()
+        if env:
+            try:
+                value = int(env)
+            except ValueError:
+                value = 0
+            if value < 1:
+                raise ValueError(f"CODEASSURE_CONCURRENCY={env!r} is invalid; use an integer >= 1")
+            return value
+        return self.concurrency
+
+    @property
     def enrich_mode(self) -> str:
         """Effective enrichment mode: CODEASSURE_ENRICH > config file; `enrichment: false` means off."""
         env = os.environ.get("CODEASSURE_ENRICH", "").strip().lower()
@@ -286,7 +300,9 @@ def load_config(path: Path | None = None) -> Config:
             name=os.environ["CODEASSURE_MODEL_NAME"],
             api_base=os.environ.get("CODEASSURE_API_BASE"),
             api_key="$CODEASSURE_API_KEY",
-        ))
+            # Env config is the scanner/CI path, where a repo can leave hundreds of findings for the
+            # model; the file default (7) made a 400-finding scan take ~20 minutes.
+        ), concurrency=24)
         _active.apply()
         return _active
 
