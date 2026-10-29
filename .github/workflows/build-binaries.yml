@@ -1,0 +1,139 @@
+name: Build binaries
+
+# Standalone PyInstaller binaries: Linux amd64, macOS arm64, Windows amd64.
+#
+#   Build any branch / tag / commit:  Actions > "Build binaries" > Run workflow
+#       ref          what to build (branch, tag or commit; default = the branch you picked)
+#       release_tag  optional; attach the binaries + SHA256SUMS to this GitHub release (created if missing)
+#   A normal run only uploads workflow artifacts (kept 14 days). Pushing a v* tag builds and publishes it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build (default: the selected branch)"
+        required: false
+        default: ""
+      release_tag:
+        description: "Publish to this release tag (e.g. v0.3.0-rc1). Leave empty to only build."
+        required: false
+        default: ""
+  push:
+    branches: [ci/binary-build]
+    tags: ["v*"]
+
+env:
+  APP: codeassure
+  SPEC: codeassure.spec
+  REF: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      # Debian 11 base keeps the glibc requirement at 2.31, so the binary also runs on Ubuntu 20.04+,
+      # RHEL 9 and Amazon Linux 2023. The build fails if it needs anything newer.
+      - name: Build
+        run: |
+          docker run --rm -v "$PWD":/work -w /work \
+            -e APP -e SPEC -e HUID="$(id -u)" -e HGID="$(id -g)" -e PIP_ROOT_USER_ACTION=ignore \
+            python:3.11-bullseye bash -euo pipefail -c '
+              python -m pip install --quiet --upgrade pip
+              python -m pip install --quiet ".[build]"
+              pyinstaller "$SPEC" --clean --noconfirm
+              highest=$(objdump -T "dist/$APP" | grep -oE "GLIBC_[0-9.]+" | sed s/GLIBC_// | sort -V | tail -1)
+              echo "highest glibc symbol: $highest"
+              [ "$(printf "%s\n%s\n" "$highest" 2.31 | sort -V | tail -1)" = "2.31" ] || { echo "needs glibc $highest (> 2.31)"; exit 1; }
+              "./dist/$APP" --help >/dev/null
+              mkdir -p dist/release
+              cp "dist/$APP" "dist/release/$APP-linux-amd64"
+              chown -R "$HUID:$HGID" /work
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}-linux-amd64
+          path: dist/release/${{ env.APP }}-linux-amd64
+          retention-days: 14
+
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[build]"
+          pyinstaller "$SPEC" --clean --noconfirm
+          "./dist/$APP" --help >/dev/null
+          mkdir -p dist/release
+          cp "dist/$APP" "dist/release/$APP-darwin-arm64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}-darwin-arm64
+          path: dist/release/${{ env.APP }}-darwin-arm64
+          retention-days: 14
+
+  windows-amd64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[build]"
+          pyinstaller "$SPEC" --clean --noconfirm
+          "./dist/$APP.exe" --help >/dev/null
+          mkdir -p dist/release
+          cp "dist/$APP.exe" "dist/release/$APP-windows-amd64.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}-windows-amd64
+          path: dist/release/${{ env.APP }}-windows-amd64.exe
+          retention-days: 14
+
+  publish:
+    # Only with a release tag (input) or a pushed v* tag, and only if all three builds passed.
+    needs: [linux-amd64, macos-arm64, windows-amd64]
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') || startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: assets
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --target "$(git rev-parse HEAD)" --prerelease --title "$TAG" \
+                 --notes "Standalone binaries built from $(git rev-parse --short HEAD) ($REF)."
+          gh release upload "$TAG" assets/* --clobber
